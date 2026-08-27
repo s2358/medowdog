@@ -1,0 +1,29 @@
+# Virtual environment
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# Superseded database copies — kept locally for provenance, never versioned.
+# Only the latest .db lives in the project root and is committed.
+archive/
+
+# SQLite transient files
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+
+# Book text (copyrighted, not ours to redistribute)
+systematic_trading.txt
+
+# macOS
+.DS_Store
