@@ -16,6 +16,9 @@ __pycache__/
 # Only the latest .db lives in the project root and is committed.
 archive/
 
+# Downloaded price data — regenerable by the download script
+data/
+
 # SQLite transient files
 *.db-wal
 *.db-shm
