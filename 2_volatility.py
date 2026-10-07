@@ -1,29 +1,51 @@
+"""
+Daily returns and EWMA volatility.
+
+    python 2_volatility.py <csv> [<csv> ...]
+
+Each file is rewritten in place with 'returns', 'simple_vol' and 'ewma_vol'.
+Run after the downloader, before the EWMAC calculator script.
+
+ewma_vol is the RiskMetrics recursion, sigma^2_t = lambda*sigma^2_{t-1} + (1 - lambda)*r^2_t, which needs adjust=False. simple_vol is a rolling standard deviation kept only as a sanity check against it.
+"""
+
+import os
+import sys
 import pandas as pd
 import numpy as np
-import sys
+from config import VOL_WINDOW, VOL_LAMBDA, BUSINESS_DAYS
 
-if len(sys.argv) < 2:
-    print("Usage: python script.py <csv_path>")
-    sys.exit(1)
+def add_volatility(df, window=VOL_WINDOW, lam=VOL_LAMBDA):
+    df['date'] = pd.to_datetime(df['date'], utc=True).dt.tz_localize(None)
+    df = df.sort_values('date').reset_index(drop=True)
 
-csv_path = sys.argv[1] 
+    df['returns'] = df['close'].pct_change()
+    df['simple_vol'] = df['returns'].rolling(window=window).std()
 
-df = pd.read_csv(csv_path)
-df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
-df = df.sort_values('date').reset_index(drop=True)
-df['returns'] = df['close'].pct_change()
+    ewma_var = (df['returns'] ** 2).ewm(alpha=1 - lam, adjust=False).mean()
+    df['ewma_vol'] = np.sqrt(ewma_var)
+    return df
 
-window = 30
+def process(path):
+    df = add_volatility(pd.read_csv(path))
+    df.to_csv(path, index=False)
+    return df
 
-df['simple_vol'] = df['returns'].rolling(window=window).std()
-lambda_param = 0.94
-df['squared_returns'] = df['returns'] ** 2
-ewma = df['squared_returns'].ewm(alpha=1-lambda_param).mean()
+def main():
+    if len(sys.argv) < 2:
+        print(f"Usage: python {os.path.basename(sys.argv[0])} "
+              "<csv> [<csv> ...]")
+        sys.exit(1)
 
-df['ewma_vol'] = np.sqrt(ewma)
-df.to_csv(csv_path, index=False)
+    for path in sys.argv[1:]:
+        df = process(path)
+        last = df.iloc[-1]
+        print(f"{path}   ({len(df)}  rows, to {last['date'].date()})")
+        print(f"   simple vol  ({VOL_WINDOW}d) {last['simple_vol']:.4f}   "
+              f"ewma vol {last['ewma_vol']:.4f}   "
+              f"annualised {last['ewma_vol'] * np.sqrt(BUSINESS_DAYS):.1%}")
+    span = 2 / (1 - VOL_LAMBDA) - 1
+    print(f"\nlambda {VOL_LAMBDA} (span ~{span:.0f} days)")
 
-print("Last 20 days:")
-print(df[['date', 'close', 'returns', 'simple_vol', 'ewma_vol']].tail(20).to_string())
-print(f"\nLatest simple vol (30-day): {df['simple_vol'].iloc[-1]:.4f}")
-print(f"Latest EWMA vol: {df['ewma_vol'].iloc[-1]:.4f}")
+if __name__ == '__main__':
+    main()

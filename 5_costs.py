@@ -1,10 +1,11 @@
 """
 Measure trading costs from live bid/ask spreads.
 
-python costs.py data/SPY/*.csv data/GLDM/*.csv data/SLV/*.csv
+python 5_costs.py data/SPY/*.csv data/GLDM/*.csv data/SLV/*.csv
 
-Must run during US market hours. Run position_sizing.py first to get the TYPICAL_TRADE values - the $1 commission minimum is divided by them, so they drive the result.
+Must run during US market hours - the quote stream returns IBKR's -1 sentinel when the market is closed, which the pre-flight probe catches. 
 
+Trade sizes come from the turnover file the position sizing script writes. The $1 commission minimum is divided by them, so they dominate the result: at 5 shares the minimum is $0.20/share, at 23 it is $0.04 
 """
 
 import pandas as pd
@@ -15,15 +16,11 @@ from datetime import datetime
 
 from ib_insync import IB, Stock
 
-from config import (IB_HOST, IB_PORT, IB_MARKET_DATA_TYPE, WARMUP, COMMISSION_PER_SHARE, COMMISSION_MINIMUM, COMMISSION_MAX_PCT, SPEED_LIMIT_SR, COSTS_DIR)
+from config import (IB_HOST, IB_PORT, IB_MARKET_DATA_TYPE, WARMUP, BUSINESS_DAYS, COMMISSION_PER_SHARE, COMMISSION_MINIMUM, COMMISSION_MAX_PCT, SPEED_LIMIT_SR, COSTS_DIR, PORTFOLIO_DIR, WEIGHTS)
 
 CLIENT_ID = 21
 
-
-# typical trade size in share, per instrument - NOT the opening trade
-# this is what the $1 commission minimum gets divided by.
-# this needs actual turnover history.
-TYPICAL_TRADE = {'SPY': 4, 'GLDM': 19, 'SLV': 14}
+ANNUALISE = np.sqrt(BUSINESS_DAYS)
 
 SAMPLES = 20
 SAMPLE_INTERVAL = 15        # seconds
@@ -52,7 +49,7 @@ def wait_for_quote(ib, ticker, timeout=PROBE_TIMEOUT):
     return False
 
 def sample_quotes(ib, symbol, samples=SAMPLES, interval=SAMPLE_INTERVAL):
-    """Sample bid/ask repeastedly; return the list of spreads seen"""
+    """Sample bid/ask repeatedly; return the list of spreads seen"""
     contract = Stock(symbol, 'SMART', 'USD')
     ib.qualifyContracts(contract)
     ticker = ib.reqMktData(contract, '', False, False)
@@ -72,7 +69,7 @@ def sample_quotes(ib, symbol, samples=SAMPLES, interval=SAMPLE_INTERVAL):
                 elapsed = i * interval + waited
                 remaining = total_secs - elapsed
                 quote = (f"{ticker.bid:.2f}/{ticker.ask:.2f}"
-                     if ticker.bid and ticker .ask else "  --/--  "
+                     if ticker.bid and ticker.ask else "  --/--  "
                      )
                 print(f"\r {SPINNER[tick % 4]} {symbol:6s}  "
                   f"sample {i+1:2d}/{samples}  "
@@ -96,21 +93,33 @@ def commission_per_share(shares, price):
     return total / shares
 
 def standardised_cost(half_spread, comm_per_share, icv):
-    """ (2 x C / (16 x ICV), in annual Sharpe ratio units per round trip)"""
+    """ (2 x C / (annualised ICV), in annual Sharpe ratio units per round trip)"""
     C = half_spread + comm_per_share
-    return 2 * C / (16 * icv), C
+    return 2 * C / (ANNUALISE * icv), C
+
+def load_typical_trade():
+    """
+    Trade sizes measured by the position sizing script. The $1 commission minimum is divided by these, so they drive the whole result - reading them beats keeping a hand-copied dict in sync.
+    """
+    path = PORTFOLIO_DIR / f"turnover_{'_'.join(sorted(WEIGHTS))}.csv"
+    if not path.exists():
+        raise FileNotFoundError(
+                f"{path} not found - run the position sizing script first")
+    series = pd.read_csv(path).set_index('ticker')['typical_trade']
+    return {t: max(1, int(round(v))) for t, v in series.items()}, path.name
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python 5_costs.py <instrument_csv> [<instrument_csv> ...]")
+        print(f"Usage: python {os.path.basename(sys.argv[0])} " "<instrument_csv> [<instrument_csv> ...]")
         sys.exit(1)
 
     paths = sys.argv[1:]
     tickers = [ticker_from_path(p) for p in paths]
 
-    missing = [t for t in tickers if t not in TYPICAL_TRADE]
+    typical_trade, trade_file = load_typical_trade()
+    missing = [t for t in tickers if t not in typical_trade]
     if missing:
-        raise KeyError(f"no TYPICAL_TRADE entry for: {missing}")
+        raise KeyError(f"no typical_trade entry for: {missing}")
 
     ib = IB()
     ib.connect(IB_HOST, IB_PORT, clientId=CLIENT_ID, readonly=True)
@@ -134,6 +143,9 @@ def main():
           f"market open, sampling {len(tickers)} instruments "
           f"({SAMPLES} X {SAMPLE_INTERVAL}s each)")
 
+    print(f"trade sizes from {trade_file}: "
+          + ", ".join(f"{t} {typical_trade[t]}" for t in tickers))
+
     rows = []
     try:
         for path, ticker in zip(paths, tickers):
@@ -141,12 +153,12 @@ def main():
             spreads = sample_quotes(ib, ticker)
 
             if not spreads:
-                print(f"{ticker}: no valid quotes - market closed, or no data subsciption")
+                print(f"{ticker}: no valid quotes - market closed, or no data subscription")
                 continue
 
             spread = float(np.median(spreads))
             half = spread / 2
-            shares = TYPICAL_TRADE[ticker]
+            shares = typical_trade[ticker]
             comm = commission_per_share(shares, close)
             sc, C = standardised_cost(half, comm, icv)
 
@@ -163,9 +175,10 @@ def main():
                 'commission_per_share': round(comm, 5),
                 'cost_per_share_C': round(C, 5),
                 'icv': round(icv, 4),
-                'annualised_icv': round(16 * icv, 3),
+                'annualised_icv': round(ANNUALISE * icv, 3),
                 'standardised_cost': round(sc, 6),
                 'speed_limit_turnover': round(SPEED_LIMIT_SR / sc, 1),
+                'trade_sizes_from': trade_file,
             })
             print(f"{ticker:6s} spread {spread:.4f} C {C:.5f} "
                   f"std cost {sc:.5f} SR speed limit {SPEED_LIMIT_SR/sc:.0f}/yr")
@@ -179,9 +192,9 @@ def main():
     out = pd.DataFrame(rows)
     COSTS_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    path = COSTS_DIR / f'costs_{stamp}.csv'
-    out.to_csv(path, index=False)
-    print(f"\nwritten to {path}")
+    out_path = COSTS_DIR / f'costs_{stamp}.csv'
+    out.to_csv(out_path, index=False)
+    print(f"\nwritten to {out_path}")
 
 if __name__ == '__main__':
     main()

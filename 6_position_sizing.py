@@ -1,7 +1,7 @@
 """
 Portfolio position sizing with compounding capital.
 
-python 6_positional_sizing.py data/correlations/allocation_SPY_GLDM_SLV.csv data/SPY/*.csv data/GLDM/*.csv data/SLV/*.csv
+python 6_position_sizing.py data/correlations/allocation_SPY_GLDM_SLV.csv data/SPY/*.csv data/GLDM/*.csv data/SLV/*.csv
 
 Capital is not constant. Each day's position are sized against the equity produced by every prior day's P&L, which makes the whole calculation sequential: equity -> vol scalar -> position -> next day's P&L -> equity.
 
@@ -45,57 +45,124 @@ def load_costs():
     series = pd.read_csv(latest).set_index('ticker')['cost_per_share_C']
     return series.to_dict(), latest.name
 
+def round_half_away(x):
+    """
+    Round half away from zero. np.round uses banker's roundin, which sends 0.5 to 0 and 1.5 to 2 which isn't what we want.
+    """
+    return np.sign(x) * np.floor(np.abs(x) + 0.5)
+
 def run(frames, weights, idm, fx, capital0, vol_target, costs=None):
     """
     Walk the history day by day, compounding equity.
     
-    Within day i: yesterday's position earns todays'
+    Within day i: yesterday's position earns today's price change, equity updates, then today's forecast    is sized against that new equity and the resulting trade is paid for.
     """
+    tickers = sorted(frames)
+    index = frames[tickers[0]].index
+    n = len(index)
 
-def apply_inertia(target, buffer=INERTIA):
-    """
-    Walk the rounded target series, holding the current position until the gap exceeds 'buffer'. Returns    the position actually held.
+    close = {t: frames[t]['close'].values for t in tickers}
+    fcast = {t: frames[t]['combined_forecast'].values for t in tickers}
+    icv = {t: frames[t]['icv'].values for t in tickers}
 
-    Sequential by nature - today's held position depends on yesterday's - so this can't be vectorised.
-    """
-    held = np.empty(len(target))
-    current = 0.0
-    for i, want in enumerate(target):
-        if np.isnan(want):
-            held[i] = current
-            continue
-        denom = max(abs(current), 1.0)
-        if abs(want - current) / denom > buffer:
-            current = want
-        held[i] = current
-    return pd.Series(held, index=target.index)
+    cols = {t: {k: np.full(n, np.nan) for k in PER_TICKER_COLS}
+            for t in tickers}
+    equity = np.full(n, np.nan)
+    gross_pnl = np.zeros(n)
+    day_costs = np.zeros(n)
 
-def build_positions(df, weight, idm, capital, vol_target, fx):
-    """Add the position columns for one instrument."""
-    daily_cash_vol_target = capital * vol_target / np.sqrt(BUSINESS_DAYS)
-    
-    df = df.copy()
-    df['ivv'] = df['icv'] * fx
-    df['vol_scalar'] = daily_cash_vol_target / df['ivv']
-    df['subsystem_position'] = df['combined_forecast'] / 10 * df['vol_scalar']
-    df['portfolio_position'] = df['subsystem_position'] * weight * idm
-    df['rounded'] = df['portfolio_position'].round()
-    df['held'] = apply_inertia(df['rounded'])
-    df['trade'] = df['held'].diff().fillna(df['held'])
-    df['notional_home'] = df['held'] * df['close'] * fx
-    return df
+    cap = capital0
+    held_prev = {t: 0.0 for t in tickers}
+    ruin_at = None
+
+    for i in range(n):
+        # 1. yesterday's position meets today's price
+        if i > 0:
+            total = 0.0
+            for t in tickers:
+                p = (held_prev[t] * (close[t][i] - close[t][i - 1]) * fx
+                     if i>0 else 0.0)
+                cols[t]['pnl'][i] = p
+                total += p
+            gross_pnl[i] = total
+            cap += total
+
+        if cap <= 0:
+            ruin_at = i
+            break
+
+        # 2. size today's position against the equity we now hold
+        daily_cash_vol_target = cap * vol_target / np.sqrt(BUSINESS_DAYS)
+        spent = 0.0
+
+        for t in tickers:
+            ivv = icv[t][i] * fx
+            vol_scalar = daily_cash_vol_target / ivv if ivv > 0 else np.nan
+            subsystem = fcast[t][i] / 10 * vol_scalar
+            target = subsystem * weights[t] * idm
+            rounded = round_half_away(target) if np.isfinite(target) else np.nan
+
+            current = held_prev[t]
+            if np.isfinite(rounded):
+                denom = max(abs(current), 1.0)
+                new = rounded if abs (rounded - current) / denom > INERTIA else current
+            else:
+                new = current
+
+            trade = new - current
+            cost = abs(trade) * costs[t] * fx if costs and t in costs else 0.0
+
+            c = cols[t]
+            c['ivv'][i] = ivv
+            c['vol_scalar'][i] = vol_scalar
+            c['subsystem_position'][i] = subsystem
+            c['portfolio_position'][i] = target
+            c['rounded'][i] = rounded
+            c['held'][i] = new
+            c['trade'][i] = trade
+            c['notional_home'][i] = new * close[t][i] * fx
+            c['cost'][i] = cost
+
+            spent += cost
+            held_prev[t] = new
+
+        # 3. pay for the trades
+        day_costs[i] = spent
+        cap -= spent
+        equity[i] = cap
+
+    # if the account was wiped out, keep only te days that happened
+    end = ruin_at if ruin_at is not None else n
+    index = index[:end]
+
+    built = {}
+    for t in tickers:
+        df = pd.DataFrame({k: v[:end] for k, v in cols[t].items()}, index=index)
+        df.insert(0,'close', close[t][:end])
+        df.insert(1, 'combined_forecast', fcast[t][:end])
+        built[t] = df
+
+    notional = pd.DataFrame(
+            {t: built[t]['notional_home'] for t in tickers}).abs().sum(axis=1)
+
+    portfolio = pd.DataFrame({
+        'gross_pnl': gross_pnl[:end],
+        'cost': day_costs[:end],
+        'net_pnl': gross_pnl[:end] - day_costs[:end],
+        'equity': equity[:end],
+        'gross_notional': notional,
+        }, index=index)
+    portfolio['gross_leverage'] = (portfolio['gross_notional'] / portfolio['equity'])
+    return built, portfolio, ruin_at
 
 def turnover_stats(df, years):
-    """
-    turnover = avg blocks traded per year / (2 x avg abs blocks held).
-    The 2 is because a round trip is two trades.
-    """
+    """Carver: turnover = avg blocks traded per year / (2 x avg abs held)."""
     blocks_traded = df['trade'].abs().sum()
     avg_held = df['held'].abs().mean()
     traded_per_year = blocks_traded / years
     turnover = traded_per_year / (2 * avg_held) if avg_held else np.nan
 
-    trades = df.loc[df['trade'] != 0 , 'trade'].abs()
+    trades = df.loc[df['trade'] != 0, 'trade'].abs()
     return {
             'avg_abs_position': avg_held,
             'blocks_traded_per_year': traded_per_year,
@@ -109,12 +176,13 @@ def turnover_stats(df, years):
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: python 6_position_sizing.py <allocation_csv> "
+        print(f"Usage: python {os.path.basename(sys.argv[0])} <allocation_csv> "
               "<instrument_csv> [<instrument_csv> ...]")
         sys.exit(1)
 
     fx = fx_rate.load()
     cached = fx_rate.describe()
+    costs, costs_file = load_costs()
 
     alloc_path, inst_paths = sys.argv[1], sys.argv[2:]
     weights, idm = load_allocation(alloc_path)
@@ -131,50 +199,49 @@ def main():
         common = df.index if common is None else common.intersection(df.index)
     frames = {t: df.loc[common] for t, df in frames.items()}
 
-    years = len(common) / BUSINESS_DAYS
-    print(f"capital {CAPITAL:,.0f} {HOME_CURRENCY}   "
+    print(f"capital {CAPITAL:,.0f} {HOME_CURRENCY} (compounding)   "
           f"vol target {VOL_TARGET:.0%}   IDM {idm:.4f}")
     print(f"fx {cached['pair']} {fx:.5f} (fetched {cached['fetched_at']})")
-    print(f"window: {common[0].date()} -> {common[-1].date()}")
-    print(f"rows: {len(common)} ({years:.1f} years)\n")
+    print(f"costs: {costs_file if costs_file else 'not measured - gross only'}")
+    print(f"window: {common[0].date()} -> {common[-1].date()}  "
+          f"({len(common)} rows)\n")
 
-    built, stats = {}, {}
-    for ticker, df in frames.items():
-        built[ticker] = build_positions(df, weights[ticker], idm, CAPITAL, VOL_TARGET, fx)
-        stats[ticker] = turnover_stats(built[ticker], years)
+    built, portfolio, ruin_at = run(frames, weights, idm, fx, CAPITAL, VOL_TARGET, costs)
 
+    if ruin_at is not None:
+        print(f"*** account wiped out on {common[ruin_at].date()} "
+              f"(day {ruin_at} of {len(common)}) - truncated there ***\n")
+
+    years = len(portfolio) / BUSINESS_DAYS
+
+    stats = {t: turnover_stats(df, years) for t, df in built.items()}
     summary = pd.DataFrame(stats).T
     summary.index.name = 'ticker'
     print(summary.round(3).to_string())
 
-    print("\nTYPICAL_TRADE for costs.py:")
+    print("\nTYPICAL_TRADE for 5_costs.py:")
     print("  {" + ", ".join(
         f"'{t}': {max(1, int(round(s['typical_trade'])))}"
         for t, s in stats.items() if not np.isnan(s['typical_trade'])) + "}")
 
-    # gross leverage over time, from positions actually held
-    notional = pd.DataFrame({t: d['notional_home'] for t, d in built.items()})
-    gross = notional.abs().sum(axis=1) / CAPITAL
-    print(f"\ngross leverage   mean {gross.mean():.2f}x   "
-          f"median {gross.median():.2f}x   max {gross.max():.2f}x   "
-          f"days over 2x: {(gross > 2).mean():.1%}")
+    equity = portfolio['equity']
+    lev = portfolio['gross_leverage']
+    print(f"\nequity   start {CAPITAL:,.0f}    end {equity.iloc[-1]:,.0f}   "
+          f"min   {equity.min():,.0f}    max  {equity.max():,.0f}  {HOME_CURRENCY}")
+    print(f"gross leverage  mean  {lev.mean():.2f}x   "
+          f"median  {lev.median():.2f}x   max  {lev.max():.2f}x   "
+          f"days over 2x:  {(lev > 2).mean():.1%}")
+    if costs:
+        print(f"costs paid   {portfolio['cost'].sum():,.0f}  {HOME_CURRENCY}  "
+              f"({portfolio['cost'].sum()/years:,.0f}/yr)")
 
     PORTFOLIO_DIR.mkdir(parents=True, exist_ok=True)
     stem = '_'.join(sorted(built))
     summary.to_csv(PORTFOLIO_DIR / f'turnover_{stem}.csv')
+    portfolio.to_csv(PORTFOLIO_DIR / 'portfolio.csv')
     for ticker, df in built.items():
         df.to_csv(PORTFOLIO_DIR / f'positions_{ticker}.csv')
-    print(f"\nwritten to PORTFLIO_DIR/")
+    print(f"\nwritten to {PORTFOLIO_DIR}/")
 
 if __name__ == '__main__':
     main()
-
-
-
-
-
-
-
-
-
-

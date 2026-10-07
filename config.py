@@ -28,8 +28,13 @@ IB_PORT = 4001          # 4001 gateway live, 4002 gateway paper
 IB_MARKET_DATA_TYPE = 3 # 1 live, 3 delayed
 
 # --- framework parameters ---
+VOL_WINDOW = 30     # rolling window for the sanity-check vol
+VOL_LAMBDA = 0.94   # EWMA decay; span = 2/(1-lambda) - 1 ~32 days
 BUSINESS_DAYS = 256
 WARMUP = 256            # slowest EWMA span
+
+# instrument weights, handcrafted from Carver's Table 8
+WEIGHTS = {'SPY': 0.40, 'GLDM': 0.30, 'SLV': 0.30}
 
 FORECAST_CAP = 20
 FORECAST_SCALARS = {'16_64': 3.75, '32_128': 2.65, '64_256': 1.87}

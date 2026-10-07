@@ -1,14 +1,25 @@
+"""
+EWMAC forecasts, combined forecast, subsystem returns and ICV.
+
+python 3_ewmac_calculator.py <csv> [<csv> ...]
+
+Each file is rewritten in place with the new columns. Run after the volatility script, which supplies 'returns' and 'ewma_vol'.
+"""
+
 import pandas as pd
 import numpy as np
+import os
 import sys
-from config import (FORECAST_SCALARS, FORECAST_WEIGHTS, FDM, FORECAST_CAP, BUSINESS_DAYS, load_settings)
+from config import (FORECAST_SCALARS, FORECAST_WEIGHTS, FDM, FORECAST_CAP, BUSINESS_DAYS, VOL_TARGET)
+
+REPORT_COLS = ['date', 'close', 'combined_forecast', 'subsystem_returns', 'icv']
 
 
 def calculate_ewma(prices, span):
     return pd.Series(prices).ewm(span=span, adjust=False).mean().values
 
 
-def subsystem_returns(df, vol_target=0.3, business_days=256):
+def subsystem_returns(df, vol_target=VOL_TARGET, business_days=BUSINESS_DAYS):
     """
         Daily subsystem return as a fraction of capital.
         df must contain: 'returns', 'ewma_vol', 'combined_forecast'
@@ -23,51 +34,48 @@ def subsystem_returns(df, vol_target=0.3, business_days=256):
 
 def calculate_forecasts(df):
     close_prices = df['close'].values
-    ewma_vol = df['ewma_vol'].values
+    vol_in_price_points = df['ewma_vol'].values * close_prices
 
-    ewmac_16_64 = calculate_ewma(close_prices, 16) - calculate_ewma(close_prices, 64)
-    ewmac_32_128 = calculate_ewma(close_prices, 32) - calculate_ewma(close_prices, 128)
-    ewmac_64_256 = calculate_ewma(close_prices, 64) - calculate_ewma(close_prices, 256)
-    vol_in_price_points = ewma_vol * close_prices
-
-    df['EWMAC_16_64'] = ewmac_16_64
-    df['EWMAC_32_128'] = ewmac_32_128
-    df['EWMAC_64_256'] = ewmac_64_256
-    df['EWMAC_16_64_vol_std'] = ewmac_16_64 / vol_in_price_points
-    df['EWMAC_32_128_vol_std'] = ewmac_32_128 / vol_in_price_points
-    df['EWMAC_64_256_vol_std'] = ewmac_64_256 / vol_in_price_points
-    df['EWMAC_16_64_scaled'] = (df['EWMAC_16_64_vol_std'] * 3.75).clip(-20, 20)
-    df['EWMAC_32_128_scaled'] = (df['EWMAC_32_128_vol_std'] * 2.65).clip(-20, 20)
-    df['EWMAC_64_256_scaled'] = (df['EWMAC_64_256_vol_std'] * 1.87).clip(-20, 20)
-
-    W = [0.42, 0.16, 0.42]
-    FDM = 1.07
-    df['combined_forecast'] = ((W[0]*df['EWMAC_16_64_scaled']
-                                + W[1]*df['EWMAC_32_128_scaled']
-                                + W[2]*df['EWMAC_64_256_scaled']) * FDM).clip(-20, 20)
+    for name in FORECAST_SCALARS:
+        fast, slow = (int(n) for n in name.split('_'))
+        crossover = (calculate_ewma(close_prices, fast)
+                     - calculate_ewma(close_prices, slow))
+        df[f'EWMAC_{name}'] = crossover
+        df[f'EWMAC_{name}_vol_std'] = crossover / vol_in_price_points
+        df[f'EWMAC_{name}_scaled'] = (df[f'EWMAC_{name}_vol_std'] * FORECAST_SCALARS[name]).clip(-FORECAST_CAP, FORECAST_CAP)
+    raw = sum(FORECAST_WEIGHTS[name] * df[f'EWMAC_{name}_scaled']
+              for name in FORECAST_WEIGHTS)
+    df['combined_forecast'] = (raw * FDM).clip(-FORECAST_CAP, FORECAST_CAP)
 
     # instrument currency volatility of one block (one share)
     # = daily price vol x block value x 100, and block value = close/100
     df['icv'] = df['ewma_vol'] * df['close']
     return df
 
+def process(path):
+    df = pd.read_csv(path)
+    df = calculate_forecasts(df)
+    df['subsystem_returns'] = subsystem_returns(df)
+    df.to_csv(path, index=False)
+    return df
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python script.py <input_file_path>")
+        print(f"Usage: python {os.path.basename(sys.argv[0])} " "<csv> [<csv> ...] ")
         sys.exit(1)
-    input_file = sys.argv[1]
+    
+    missing = set(FORECAST_SCALARS) ^ set(FORECAST_WEIGHTS)
+    if missing:
+        raise KeyError(
+                f"FORECAST_SCALARS and FORECAST_WEIGHTS disagree on: {sorted(missing)}")
 
-    df = pd.read_csv(input_file)
-    df = calculate_forecasts(df)
-    df['subsystem_returns'] = subsystem_returns(df)
-    df.to_csv(input_file, index=False)
+    for path in sys.argv[1:]:
+        df = process(path)
+        print(f"\n{path}  ({len(df)} rows)")
+        print(df[REPORT_COLS].tail().to_string(index=False))
 
-    print("EWMAC calculation with vol stdization, scaling, combined forecast and subsystem returns complete")
-    print(df[['date', 'close', 'EWMAC_16_64', 'EWMAC_32_128', 'EWMAC_64_256',
-              'EWMAC_16_64_vol_std', 'EWMAC_32_128_vol_std', 'EWMAC_64_256_vol_std',
-              'EWMAC_16_64_scaled', 'EWMAC_32_128_scaled', 'EWMAC_64_256_scaled',
-              'combined_forecast', 'subsystem_returns', 'icv']].tail())
+    print(f"\nrules: {', '.join(FORECAST_SCALARS)} FDM {FDM}   "
+          f"cap +/-{FORECAST_CAP}")
 
 
 if __name__ == '__main__':

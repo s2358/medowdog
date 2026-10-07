@@ -1,0 +1,290 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Medowdog Pipeline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  /* Layout: single reading column; the figure is the page, prose frames it. */
+  :root {
+    --bg: #f3f4f6;
+    --surface: #ffffff;
+    --fg: #191d23;
+    --muted: #5d6771;
+    --line: #d2d7dd;
+    --accent: #a85c14;
+    --lane: #3a6283;
+    --lane-bg: #e8eef3;
+    --font-sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14171b;
+      --surface: #1c2026;
+      --fg: #e4e8ec;
+      --muted: #939da7;
+      --line: #2d333a;
+      --accent: #e0923f;
+      --lane: #86aece;
+      --lane-bg: #1b2831;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14171b;
+    --surface: #1c2026;
+    --fg: #e4e8ec;
+    --muted: #939da7;
+    --line: #2d333a;
+    --accent: #e0923f;
+    --lane: #86aece;
+    --lane-bg: #1b2831;
+    color-scheme: dark;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  .wrap {
+    max-width: 880px;
+    margin: 0 auto;
+    padding-inline: 20px;
+    padding-block: 40px 56px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+  }
+  h1 {
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .sub {
+    color: var(--muted);
+    margin: 6px 0 0;
+    max-width: 62ch;
+  }
+  figure { margin: 0; }
+  svg { width: 100%; height: auto; max-width: 100%; display: block; }
+  figcaption {
+    color: var(--muted);
+    font-size: 13px;
+    margin-top: 12px;
+    max-width: 64ch;
+  }
+  h2 {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 0 0 10px;
+  }
+  .notes {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin: 0;
+  }
+  .notes p { margin: 0; max-width: 66ch; }
+  .notes strong { font-weight: 600; }
+  code, pre {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  p code { font-size: 13px; color: var(--accent); }
+  pre {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 0;
+    line-height: 1.75;
+    min-width: 0;
+  }
+  .cols {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 24px;
+  }
+  .col { min-width: 0; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 0; }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <h1>Medowdog Pipeline</h1>
+    <p class="sub">Six scripts in fixed order, one price file per ticker rewritten in place, and a cost measurement that depends on the step that depends on it.</p>
+  </header>
+
+  <figure>
+    <svg viewBox="0 0 740 760" role="img"
+         aria-label="Flow diagram: run.py executes fx_rate, downloader, volatility, ewmac, correlation and position sizing in sequence; scripts 1, 2 and 3 write to one price CSV per ticker that scripts 4, 6 and 5 read; the cost script runs separately on a cron and exchanges trade sizes and cost per share with the position sizing script.">
+      <defs>
+        <marker id="arw" viewBox="0 0 8 6" refX="7.5" refY="3" markerWidth="7" markerHeight="5.5" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="currentColor"/>
+        </marker>
+        <marker id="arwA" viewBox="0 0 8 6" refX="7.5" refY="3" markerWidth="7" markerHeight="5.5" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="var(--accent)"/>
+        </marker>
+      </defs>
+
+      <g font-family="IBM Plex Mono, ui-monospace, monospace" fill="currentColor">
+
+        <!-- run.py bracket -->
+        <text x="54" y="74" font-size="11" fill="var(--muted)" letter-spacing="0.06em">run.py — one command, stops at first failure</text>
+        <rect x="54" y="86" width="344" height="478" rx="12" fill="none"
+              stroke="var(--line)" stroke-width="1.5" stroke-dasharray="5 5"/>
+
+        <!-- script boxes -->
+        <g>
+          <rect x="68" y="110" width="316" height="52" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+          <text x="84" y="132" font-size="13" font-weight="600">fx_rate.py</text>
+          <text x="84" y="150" font-size="10.5" fill="var(--muted)">data/fx_rate.json</text>
+          <circle cx="366" cy="124" r="3.5" fill="var(--lane)"/>
+        </g>
+        <g>
+          <rect x="68" y="182" width="316" height="52" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+          <text x="84" y="204" font-size="13" font-weight="600">1_ibkr_downloader.py</text>
+          <text x="84" y="222" font-size="10.5" fill="var(--muted)">archives the previous download</text>
+          <circle cx="366" cy="196" r="3.5" fill="var(--lane)"/>
+        </g>
+        <g>
+          <rect x="68" y="254" width="316" height="52" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+          <text x="84" y="276" font-size="13" font-weight="600">2_volatility.py</text>
+          <text x="84" y="294" font-size="10.5" fill="var(--muted)">no new file — edits in place</text>
+        </g>
+        <g>
+          <rect x="68" y="326" width="316" height="52" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+          <text x="84" y="348" font-size="13" font-weight="600">3_ewmac_calculator.py</text>
+          <text x="84" y="366" font-size="10.5" fill="var(--muted)">no new file — edits in place</text>
+        </g>
+        <g>
+          <rect x="68" y="398" width="316" height="52" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+          <text x="84" y="420" font-size="13" font-weight="600">4_correlation.py</text>
+          <text x="84" y="438" font-size="10.5" fill="var(--muted)">allocation: weights + IDM</text>
+        </g>
+        <g>
+          <rect x="68" y="470" width="316" height="52" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+          <text x="84" y="492" font-size="13" font-weight="600">6_position_sizing.py</text>
+          <text x="84" y="510" font-size="10.5" fill="var(--muted)">positions · turnover · portfolio</text>
+        </g>
+
+        <!-- sequence arrows -->
+        <g stroke="currentColor" stroke-width="1.5" marker-end="url(#arw)">
+          <line x1="226" y1="162" x2="226" y2="178"/>
+          <line x1="226" y1="234" x2="226" y2="250"/>
+          <line x1="226" y1="306" x2="226" y2="322"/>
+          <line x1="226" y1="378" x2="226" y2="394"/>
+          <line x1="226" y1="450" x2="226" y2="466"/>
+        </g>
+
+        <!-- the price file lane -->
+        <rect x="462" y="176" width="236" height="362" rx="10"
+              fill="var(--lane-bg)" stroke="var(--lane)" stroke-width="1.5"/>
+        <text x="480" y="202" font-size="11" font-weight="600" fill="var(--lane)">data/TICKER/TICKER_stamp.csv</text>
+        <line x1="480" y1="214" x2="680" y2="214" stroke="var(--lane)" stroke-width="1" opacity="0.4"/>
+
+        <text x="480" y="240" font-size="10.5" fill="var(--muted)">1 →</text>
+        <text x="512" y="240" font-size="10.5">date, open, high, low, close</text>
+
+        <text x="480" y="284" font-size="10.5" fill="var(--muted)">2 →</text>
+        <text x="512" y="284" font-size="10.5">returns, simple_vol,</text>
+        <text x="512" y="300" font-size="10.5">ewma_vol</text>
+
+        <text x="480" y="344" font-size="10.5" fill="var(--muted)">3 →</text>
+        <text x="512" y="344" font-size="10.5">EWMAC_*, combined_</text>
+        <text x="512" y="360" font-size="10.5">forecast, icv,</text>
+        <text x="512" y="376" font-size="10.5">subsystem_returns</text>
+
+        <line x1="480" y1="406" x2="680" y2="406" stroke="var(--lane)" stroke-width="1" opacity="0.4"/>
+        <text x="480" y="430" font-size="10.5" fill="var(--muted)">4, 6 and 5 read this file.</text>
+        <text x="480" y="448" font-size="10.5" fill="var(--muted)">Two files here breaks it.</text>
+
+        <!-- writes into the lane -->
+        <g stroke="currentColor" stroke-width="1.5" marker-end="url(#arw)">
+          <line x1="390" y1="208" x2="456" y2="208"/>
+          <line x1="390" y1="280" x2="456" y2="280"/>
+          <line x1="390" y1="352" x2="456" y2="352"/>
+        </g>
+        <!-- reads out of the lane -->
+        <g stroke="currentColor" stroke-width="1.5" marker-end="url(#arw)">
+          <line x1="456" y1="424" x2="390" y2="424"/>
+          <line x1="456" y1="496" x2="390" y2="496"/>
+          <line x1="560" y1="538" x2="560" y2="602"/>
+        </g>
+
+        <!-- cost script, outside run.py -->
+        <text x="400" y="596" font-size="11" fill="var(--muted)" letter-spacing="0.06em">cron 23:30 SGT — needs US market hours</text>
+        <rect x="400" y="608" width="298" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+        <text x="416" y="632" font-size="13" font-weight="600">5_costs.py</text>
+        <text x="416" y="650" font-size="10.5" fill="var(--muted)">costs: cost_per_share_C</text>
+        <circle cx="680" cy="624" r="3.5" fill="var(--lane)"/>
+
+        <!-- the loop -->
+        <g stroke="var(--accent)" stroke-width="1.75" fill="none" marker-end="url(#arwA)">
+          <path d="M 226 522 V 572 H 452 V 602"/>
+          <path d="M 400 650 H 36 V 496 H 62"/>
+        </g>
+        <text x="266" y="566" font-size="11" fill="var(--accent)" font-weight="500">typical_trade</text>
+        <text x="150" y="642" font-size="11" fill="var(--accent)" font-weight="500">cost_per_share_C</text>
+
+        <!-- legend -->
+        <line x1="54" y1="690" x2="698" y2="690" stroke="var(--line)" stroke-width="1"/>
+        <g font-size="10.5" fill="var(--muted)">
+          <line x1="54" y1="714" x2="86" y2="714" stroke="currentColor" stroke-width="1.5" marker-end="url(#arw)"/>
+          <text x="96" y="718">reads or writes the price file</text>
+
+          <line x1="400" y1="714" x2="432" y2="714" stroke="var(--accent)" stroke-width="1.75" marker-end="url(#arwA)"/>
+          <text x="442" y="718">the cost loop</text>
+
+          <circle cx="66" cy="742" r="3.5" fill="var(--lane)"/>
+          <text x="96" y="746">needs IB Gateway on port 4001</text>
+
+          <text x="400" y="746">config.py feeds every box; nothing writes back to it.</text>
+        </g>
+      </g>
+    </svg>
+    <figcaption>Six steps run in order under one command. Scripts 2 and 3 produce no files of their own — they add columns to the file the downloader wrote, which is why exactly one CSV may sit in each ticker folder.</figcaption>
+  </figure>
+
+  <hr>
+
+  <div class="notes">
+    <h2>What the picture is for</h2>
+    <p><strong>The lane is a single file, not a stage.</strong> <code>2_volatility.py</code> and <code>3_ewmac_calculator.py</code> read the downloader's CSV and write the same path back. A second file in <code>data/SPY/</code> means the per-file scripts process the older one and say nothing, while <code>4_correlation.py</code> dies at <code>weights sum to 2.0000</code>.</p>
+    <p><strong>The amber path is a cycle, so neither end can go first.</strong> Script 6 measures the trade sizes that script 5 divides the $1 commission minimum by; script 5 measures the cost per share that script 6 deducts from compounding equity. On a cold start, run 6 once with no cost file — it reports gross — then 5, then 6 again.</p>
+    <p><strong>Script 5 sits outside the bracket because of the clock, not the dependencies.</strong> The quote stream returns IBKR's &minus;1 sentinel when the US market is closed, so it runs mid-session at 23:30 SGT while everything else runs after the close.</p>
+  </div>
+
+  <hr>
+
+  <div class="cols">
+    <div class="col">
+      <h2>Daily, one command</h2>
+      <pre>cd /Users/sid/Code/medowdog
+.venv/bin/python run.py
+
+# → logs/run_&lt;stamp&gt;.log</pre>
+    </div>
+    <div class="col">
+      <h2>Weeknights, 23:30 SGT</h2>
+      <pre>30 23 * * 1-5 cd /Users/sid/Code/medowdog
+  &amp;&amp; .venv/bin/python 5_costs.py
+     data/SPY/*.csv data/GLDM/*.csv
+     data/SLV/*.csv
+  &gt;&gt; logs/costs.log 2&gt;&amp;1</pre>
+    </div>
+  </div>
+
+</div>
+
+</body></html>
