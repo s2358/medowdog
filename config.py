@@ -12,6 +12,7 @@ CORRELATIONS_DIR = DATA_DIR / 'correlations'
 PORTFOLIO_DIR = DATA_DIR / 'portfolio'
 COSTS_DIR = DATA_DIR / 'costs'
 FX_CACHE = DATA_DIR / 'fx_rate.json'
+DIVIDENDS_DIR = DATA_DIR / 'dividends'
 
 # --- account ---
 CAPITAL = 10000.0       # home currency (SGD)
@@ -21,6 +22,9 @@ HOME_CURRENCY = 'SGD'
 # --- fx ---
 FX_PAIR = 'USDSGD'      # home currency per unit of instrument currency
 FX_MAX_AGE_DAYS = 7
+
+# --- dividends ---
+DIVIDEND_MAX_AGE_DAYS = 90
 
 # --- interactive brokers ---
 IB_HOST = '127.0.0.1'
@@ -50,7 +54,8 @@ COMMISSION_PER_SHARE = 0.005
 COMMISSION_MINIMUM = 1.00
 COMMISSION_MAX_PCT = 0.01   # capped at 1% of trade value
 
-
+# --- tax? ---
+US_WITHHOLDING = 0.30
 
 
 

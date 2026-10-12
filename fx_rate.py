@@ -4,7 +4,7 @@ Fetch and cache the FX rate.
 Run this to refresh: python fx_rate.py
 Read it from a script: from fx_rate import load
 
-The cache exists so that the backtest doesn't need IB gateway running. ib_insync is imported inside fetch() for the same reason - reading the cached rate must not require the broker library to be installed.
+The cache exists so that the backtest doesn't need IB gateway running. ib_async is imported inside fetch() for the same reason - reading the cached rate must not require the broker library to be installed.
 """
 
 import json
@@ -40,7 +40,7 @@ def describe(path=FX_CACHE):
 
 def fetch(pair=FX_PAIR):
     """Connect to IB Gateway and return (mid, bid, ask)."""
-    from ib_insync import IB, Forex
+    from ib_async import IB, Forex
     ib = IB()
     ib.connect(IB_HOST, IB_PORT, clientId=CLIENT_ID, readonly=True)
     try:
@@ -78,7 +78,21 @@ def save(rate, bid, ask, pair=FX_PAIR, path=FX_CACHE):
         }, indent=2))
 
 def main():
-    rate, bid, ask = fetch()
+    try:
+        rate, bid, ask = fetch()
+    except Exception as exc:
+        if not FX_CACHE.exists():
+            raise
+        cached = describe()
+        fetched = datetime.datetime.fromisoformat(cached['fetched_at'])
+        age = (datetime.datetime.now() - fetched).days
+        if age > FX_MAX_AGE_DAYS:
+            raise
+        print(f"fetch failed: {exc}")
+        print(f"keeping cached {cached['pair']} {cached['rate']:.5f} from "
+              f"{cached['fetched_at']} ({age}d old, max {FX_MAX_AGE_DAYS})")
+        return
+
     save(rate, bid, ask)
 
     spread_bp = (ask - bid) / rate * 1e4

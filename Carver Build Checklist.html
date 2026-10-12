@@ -1,0 +1,878 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Carver Build Checklist</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<style>
+  :root {
+    --bg: #f6f6f4;
+    --panel: #ffffff;
+    --panel-2: #fbfbfa;
+    --ink: #16181c;
+    --ink-2: #4a505a;
+    --ink-3: #7b828e;
+    --line: #e2e2dd;
+    --line-2: #cfd0ca;
+    --accent: #1f4e79;
+    --accent-soft: #eaf0f6;
+    --crit: #8a4b00;
+    --crit-soft: #fdf1e0;
+    --crit-line: #e8c38a;
+    --done: #2e6b45;
+    --done-soft: #ecf4ee;
+    --mono: 'IBM Plex Mono', ui-monospace, monospace;
+    --sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14161a;
+      --panel: #1c1f24;
+      --panel-2: #20242a;
+      --ink: #eceef1;
+      --ink-2: #b4bac3;
+      --ink-3: #828a96;
+      --line: #2c3138;
+      --line-2: #3a4049;
+      --accent: #7fb0dd;
+      --accent-soft: #1c2b39;
+      --crit: #e0a964;
+      --crit-soft: #2d2317;
+      --crit-line: #5b4525;
+      --done: #7fc49b;
+      --done-soft: #1a2a20;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #14161a;
+    --panel: #1c1f24;
+    --panel-2: #20242a;
+    --ink: #eceef1;
+    --ink-2: #b4bac3;
+    --ink-3: #828a96;
+    --line: #2c3138;
+    --line-2: #3a4049;
+    --accent: #7fb0dd;
+    --accent-soft: #1c2b39;
+    --crit: #e0a964;
+    --crit-soft: #2d2317;
+    --crit-line: #5b4525;
+    --done: #7fc49b;
+    --done-soft: #1a2a20;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 48px 16px 96px;
+  }
+
+  header { margin-bottom: 36px; }
+
+  h1 {
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    margin: 0 0 6px;
+  }
+
+  .sub {
+    color: var(--ink-2);
+    font-size: 14.5px;
+    margin: 0 0 24px;
+    max-width: 62ch;
+  }
+
+  .meter {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+
+  .meter-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+
+  .meter-count {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+
+  .meter-note {
+    font-size: 12.5px;
+    color: var(--ink-3);
+  }
+
+  .track {
+    height: 6px;
+    background: var(--line);
+    border-radius: 99px;
+    overflow: hidden;
+  }
+
+  .fill {
+    height: 100%;
+    width: 0%;
+    background: var(--done);
+    border-radius: 99px;
+    transition: width 220ms ease;
+  }
+
+  .phase { margin-top: 38px; }
+
+  .phase-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--line-2);
+    margin-bottom: 14px;
+  }
+
+  .phase-num {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 2px 7px;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+
+  .phase-head h2 {
+    font-size: 16.5px;
+    font-weight: 600;
+    margin: 0;
+    flex: 1;
+  }
+
+  .phase-gate {
+    font-size: 12.5px;
+    color: var(--ink-3);
+    font-style: italic;
+  }
+
+  .item {
+    display: grid;
+    grid-template-columns: 26px 1fr;
+    gap: 12px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 13px 15px;
+    margin-bottom: 8px;
+    transition: background 160ms ease, border-color 160ms ease;
+  }
+
+  .item.critical { border-left: 3px solid var(--crit-line); }
+
+  .item.done {
+    background: var(--done-soft);
+    border-color: var(--done);
+  }
+
+  .box {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 19px;
+    height: 19px;
+    margin: 4px 0 0;
+    border: 1.5px solid var(--line-2);
+    border-radius: 5px;
+    background: var(--panel-2);
+    cursor: pointer;
+    position: relative;
+    flex: none;
+    transition: background 140ms ease, border-color 140ms ease;
+  }
+
+  .box:hover { border-color: var(--done); }
+
+  .box:checked {
+    background: var(--done);
+    border-color: var(--done);
+  }
+
+  .box:checked::after {
+    content: '';
+    position: absolute;
+    left: 5px;
+    top: 2px;
+    width: 5px;
+    height: 10px;
+    border: solid #fff;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+
+  .box:disabled { cursor: not-allowed; opacity: 0.45; }
+
+  details summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+  }
+
+  details summary::-webkit-details-marker { display: none; }
+
+  .caret {
+    flex: none;
+    width: 9px;
+    margin-top: 1px;
+    color: var(--ink-3);
+    font-size: 10px;
+    transition: transform 160ms ease;
+  }
+
+  details[open] .caret { transform: rotate(90deg); }
+
+  .idx {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--ink-3);
+    flex: none;
+    min-width: 20px;
+  }
+
+  .title {
+    font-weight: 500;
+    flex: 1;
+  }
+
+  .item.done .title {
+    color: var(--ink-3);
+    text-decoration: line-through;
+    text-decoration-color: var(--line-2);
+  }
+
+  .pill {
+    flex: none;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--crit);
+    background: var(--crit-soft);
+    border: 1px solid var(--crit-line);
+    padding: 1px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+
+  .detail {
+    margin: 11px 0 2px 18px;
+    padding-left: 14px;
+    border-left: 2px solid var(--line);
+    color: var(--ink-2);
+    font-size: 14px;
+  }
+
+  .detail p { margin: 0 0 9px; }
+  .detail p:last-child { margin-bottom: 0; }
+  .detail strong { color: var(--ink); font-weight: 500; }
+
+  code {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.5px 4px;
+  }
+
+  .closed { margin-top: 44px; }
+
+  .closed-item {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 13px 15px;
+    margin-bottom: 8px;
+  }
+
+  .closed-item .title { color: var(--ink-2); }
+
+  footer {
+    margin-top: 44px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    font-size: 13px;
+    color: var(--ink-3);
+  }
+
+  footer p { margin: 0 0 7px; }
+
+  #status {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-3);
+  }
+
+  @media (max-width: 560px) {
+    .wrap { padding: 32px 16px 72px; }
+    h1 { font-size: 23px; }
+    .item { grid-template-columns: 24px 1fr; gap: 10px; padding: 12px; }
+    .detail { margin-left: 0; }
+    .phase-head { flex-wrap: wrap; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Carver Build Checklist</h1>
+    <p class="sub">What remains between the current backtest and a system that can be
+      traded. Ordered so that nothing downstream is tuned before the things it depends
+      on are measured. Four items carry a <span class="pill">critical</span> mark: until
+      those are done, the 18.7%/yr figure is not a result, it is an estimate with known
+      omissions.</p>
+    <div class="meter">
+      <div class="meter-top">
+        <span class="meter-count"><span id="count">0</span> / 21 done</span>
+        <span class="meter-note" id="status">loading saved state&hellip;</span>
+      </div>
+      <div class="track"><div class="fill" id="fill"></div></div>
+    </div>
+  </header>
+
+  <div id="phases"></div>
+
+  <section class="closed">
+    <div class="phase-head">
+      <span class="phase-num">closed</span>
+      <h2>Decided against</h2>
+      <span class="phase-gate">kept here so the reasoning is not re-litigated</span>
+    </div>
+    <div id="rejected"></div>
+  </section>
+
+  <footer>
+    <p>Ticks are stored server-side, so they survive a reload and follow you across
+      devices. The content of the page can be amended without losing them.</p>
+    <p>Repository <code>s2358/medowdog</code> &middot; capital SGD 10,000 &middot;
+      vol target 30% &middot; SPY / GLDM / SLV at 40 / 30 / 30</p>
+  </footer>
+</div>
+
+<script>
+  const PHASES = [
+    {
+      num: 'phase 0',
+      title: 'Measure what exists',
+      gate: 'nothing new is added until the current system is honestly priced',
+      items: [
+        {
+          id: 'eval-stats',
+          title: 'Script 7: evaluation statistics',
+          critical: true,
+          detail: `<p>Sharpe from daily net returns <code>pnl_t / equity_{t-1}</code>,
+            annualised by &radic;256. Max drawdown from the running peak of the equity
+            column. Skew on <strong>both daily and monthly</strong> returns, because skew is
+            horizon-dependent &mdash; a trend system's positive monthly skew routinely sits
+            on top of negative daily skew, and reporting only one of them hides the
+            shape of the return distribution.</p>
+          <p>Report the standard error next to each skew figure. SE &asymp; &radic;(6/n),
+            so at ~1,570 daily rows the daily number is &plusmn;0.06 and the ~75 monthly
+            points give &plusmn;0.28. A monthly skew of 0.3 is therefore not
+            distinguishable from zero.</p>
+          <p>Reads <code>data/portfolio/portfolio.csv</code> only. No new inputs, no
+            IBKR connection, no dependency on anything else on this list. This is why it
+            is first.</p>`
+        },
+        {
+          id: 'dividends',
+          title: 'Dividends in the P&amp;L',
+          detail: `<p><code>whatToShow="TRADES"</code> is split-adjusted but
+            <strong>not</strong> dividend-adjusted, so every distribution is currently
+            missing from the backtest. SPY yields roughly 1.2%/yr; GLDM and SLV pay
+            nothing, so this is a one-instrument correction worth ~0.5%/yr at the
+            portfolio's 40% SPY weight.</p>
+          <p>Do <strong>not</strong> switch to <code>ADJUSTED_LAST</code>. A
+            dividend-adjusted series is restated retroactively every time a distribution
+            is paid, which means each download silently changes history and no backtest
+            can be reproduced against an earlier one.</p>
+          <p>Instead: download the dividend schedule once, add
+            <code>held &times; dps &times; fx</code> to the P&amp;L on the ex-date, and
+            net 30% US withholding &mdash; Singapore has no US tax treaty, so there is no
+            reduced rate and no reclaim.</p>`
+        },
+        {
+          id: 'financing',
+          title: 'Margin financing in the P&amp;L',
+          critical: true,
+          detail: `<p>Mean gross leverage in the last backtest was 2.45&times;, max
+            7.78&times;, and 56.4% of days sat above 2&times;. Every unit above 1&times; is
+            borrowed money, and IBKR charges roughly benchmark + 1.5% on the debit
+            balance. None of that appears in the equity curve.</p>
+          <p>Average borrowing of ~1.45&times; equity, on an account compounding from
+            10,000 to 34,000 SGD, is a four-figure cumulative cost over the sample. The
+            18.7%/yr result is gross of it.</p>
+          <p>Accrue daily:
+            <code>(gross_notional &minus; equity) &times; rate / 360</code>, deducted in
+            the same place as trading costs in step 3 of the loop in script 6. The rate
+            should be a series, not a constant &mdash; the sample spans a period when the
+            USD benchmark went from near zero to above 5%.</p>`
+        },
+        {
+          id: 'fx-series',
+          title: 'Daily FX series instead of one spot rate',
+          detail: `<p>A single cached USDSGD rate is currently applied to the entire
+            history. USDSGD was around 1.37 early in the sample and nearer 1.29 at the
+            end, so using today's rate to convert a 2021 P&amp;L mis-states it by several
+            percent in the wrong direction.</p>
+          <p>Download the daily FX bar series, join it on date, and use
+            <code>fx_t</code> in the P&amp;L and in the IVV calculation inside the loop.
+            The spot cache from <code>fx_rate.py</code> stays &mdash; it is the right
+            input for sizing <em>today's</em> live position, which is a different job from
+            converting historical P&amp;L.</p>`
+        }
+      ]
+    },
+    {
+      num: 'phase 1',
+      title: 'Risk controls',
+      gate: 'the backtest currently contains positions that could not have been held',
+      items: [
+        {
+          id: 'position-limit',
+          title: 'Position limit per instrument',
+          critical: true,
+          detail: `<p>No cap exists. A single instrument takes the whole risk budget
+            whenever its forecast is at &plusmn;20 and its measured vol has collapsed
+            &mdash; the vol scalar is
+            <code>daily_cash_vol_target / IVV</code>, so a halving of EWMA vol doubles the
+            position for the same forecast.</p>
+          <p>Carver's rule: cap each position at the size that a forecast of 20 and the
+            instrument's <em>long-run</em> vol would produce. That way a transient vol
+            estimate cannot generate a position the long-run risk of the instrument does
+            not justify. The cap binds rarely, which is exactly the point &mdash; it only
+            fires on the days that would otherwise do the damage.</p>`
+        },
+        {
+          id: 'leverage-cap',
+          title: 'Portfolio leverage cap',
+          critical: true,
+          detail: `<p>The backtest reached 7.78&times; gross leverage. Reg T's 25%
+            overnight maintenance requirement makes 4&times; the hard broker limit, and
+            above it the position is <strong>liquidated</strong>, not margin-called. Those
+            days in the backtest are therefore fictional: the real account would have been
+            forcibly reduced.</p>
+          <p>Cap gross leverage and scale every position down pro rata when the cap
+            binds, then re-run. The 18.7%/yr figure will fall &mdash; the question worth
+            answering is by how much, because that gap is the portion of the result that
+            was never available.</p>`
+        },
+        {
+          id: 'vol-target',
+          title: 'Decide the vol target deliberately',
+          detail: `<p>30% is in <code>config.py</code> without a justification behind
+            it. It interacts directly with the two items above: at a 30% target with IDM
+            1.42, the system naturally wants 2&ndash;3&times; leverage, which is precisely
+            why the Reg T cap bites.</p>
+          <p>Two coherent choices. Lower the target until the cap almost never binds, and
+            the system's own sizing is doing the work. Or keep 30% and accept the cap as
+            the binding constraint, knowing that the realised vol will be lower than the
+            target and the forecast's information is being thrown away on the days it is
+            strongest. Either is defensible; drifting into one by accident is not.</p>`
+        }
+      ]
+    },
+    {
+      num: 'phase 2',
+      title: 'Fit your own parameters',
+      gate: 'currently every forecast parameter is borrowed from the book',
+      items: [
+        {
+          id: 'fit-scalars',
+          title: 'Fit the forecast scalars',
+          detail: `<p><code>10 / mean(|vol-standardised forecast|)</code>, computed on
+            <strong>uncapped</strong> values and pooled across instruments. Currently
+            using Carver's 3.75 / 2.65 / 1.87 for 16_64 / 32_128 / 64_256.</p>
+          <p>Those were fitted on futures with decades of history. Three ETFs over 1,826
+            rows is a thin sample for the same estimate, but the computation is three
+            lines and the answer tells you whether the borrowed numbers are even in the
+            right neighbourhood for this universe.</p>`
+        },
+        {
+          id: 'fit-weights',
+          title: 'Fit the forecast weights',
+          detail: `<p>Currently 0.42 / 0.16 / 0.42, which comes from handcrafting Table 8
+            row 11 with correlation inputs <code>(0.9, 0.5, 0.9)</code> &mdash; an
+            assumption about how the three EWMAC spans co-move.</p>
+          <p>Those correlations are measurable. Compute the correlation matrix of the
+            three <em>scaled forecast series</em> and handcraft from the measured row
+            rather than the assumed one. If the answer is still near 42/16/42 the
+            assumption was sound; if the fast and slow rules turn out to correlate at 0.7
+            rather than 0.9, the middle rule deserves more weight than it is getting.</p>`
+        },
+        {
+          id: 'fit-fdm',
+          title: 'Fit the FDM',
+          detail: `<p><code>FDM = 1 / &radic;(W &times; H &times; W&#7488;)</code> where H
+            is the correlation matrix of the <strong>scaled forecast values</strong>
+            &mdash; not of subsystem returns, which is the IDM. Currently 1.07 from the
+            book.</p>
+          <p>Script 4 already does exactly this arithmetic for the IDM, including the
+            floor at zero and the cap. The FDM is the same function over a different
+            correlation matrix, so this is a refactor rather than new code: one function
+            taking weights and a matrix, called twice.</p>`
+        },
+        {
+          id: 'compare-carver',
+          title: "Compare the fitted values against Carver's",
+          detail: `<p>The point of the three items above is <strong>not</strong> to
+            replace the published values. It is to see how far the fitted ones drift from
+            them.</p>
+          <p>A small gap means the book's numbers transfer to this universe and should be
+            kept, because they rest on far more data. A large gap on 1,826 rows is
+            evidence of <strong>overfitting in your own estimate</strong>, not of a better
+            parameter &mdash; the correlation standard error alone,
+            <code>(1 &minus; r&sup2;) / &radic;(n &minus; 1)</code>, shows how much of the
+            drift is noise. Write the comparison down and keep the book's values unless
+            the difference survives the out-of-sample split.</p>`
+        }
+      ]
+    },
+    {
+      num: 'phase 3',
+      title: 'Validation',
+      gate: 'does any of this beat the obvious alternative',
+      items: [
+        {
+          id: 'benchmark',
+          title: 'Benchmark against buy-and-hold',
+          detail: `<p>Same three instruments at the same 40/30/30 weights, unlevered,
+            rebalanced annually, over the same window and the same costs. This is the
+            thing the system has to beat.</p>
+          <p>Compare it after the corrections in phase 0 and the caps in phase 1 are in,
+            not before &mdash; right now the comparison would be between a levered,
+            financing-free, dividend-free trend system and an honest passive portfolio,
+            which flatters the trend system in three separate ways.</p>`
+        },
+        {
+          id: 'oos-split',
+          title: 'Out-of-sample split',
+          detail: `<p>1,826 rows minus the 256-row warmup leaves roughly 1,570 usable
+            days, or about six years. Fit anything that gets fitted on the first 60% and
+            measure on the last 40%.</p>
+          <p>Without this, phase 2 produces numbers that cannot be distinguished from
+            curve-fitting, and the comparison in the previous item has no standing. Six
+            years is not much to split &mdash; which is itself an argument for keeping the
+            book's parameters.</p>`
+        },
+        {
+          id: 'cost-sensitivity',
+          title: 'Cost sensitivity',
+          detail: `<p>Re-run at 1&times;, 2&times; and 5&times; the measured cost level.
+            Measured costs were 3,259 SGD over the sample (457/yr) against roughly 24,000
+            of gross profit, so a 5&times; underestimate removes more than half the
+            result.</p>
+          <p>This is not a hypothetical margin of error. Script 5 measures the spread at a
+            single moment during US hours; GLDM and SLV spreads widen materially outside
+            them, and the commission floor of 1.00 USD means small trades cost far more
+            per share than the measured figure. The sensitivity run tells you how much
+            that uncertainty matters before the fills log in phase 4 replaces the estimate
+            with observation.</p>`
+        }
+      ]
+    },
+    {
+      num: 'phase 4',
+      title: 'Go live',
+      gate: 'only after phases 0 to 3 give a number worth trading',
+      items: [
+        {
+          id: 'reconcile',
+          title: 'Read IBKR positions and reconcile',
+          detail: `<p><code>reqPositions</code>, compared against the last
+            <code>held</code> row of each <code>positions_&lt;TICKER&gt;.csv</code>, and
+            fail loudly on any mismatch.</p>
+          <p>Everything downstream assumes the book matches the model. A dividend
+            reinvestment, a partial fill, or a manual trade silently breaks that
+            assumption, and the next day's <code>trade</code> column would then be
+            computed from a position that is not held. This check costs one API call and
+            is the difference between a system and a spreadsheet.</p>`
+        },
+        {
+          id: 'orders',
+          title: 'Order generation',
+          detail: `<p>Turn the final row's <code>trade</code> column into orders.
+            The 10% inertia band already suppresses small adjustments, but it is
+            proportional &mdash; on a 5-share typical SPY position it allows a 1-share
+            trade, which pays the 1.00 USD commission minimum and makes the realised cost
+            per share twenty times the measured one.</p>
+          <p>Add an absolute minimum order size on top of the proportional band, set from
+            the commission floor rather than guessed: the smallest trade whose cost stays
+            under the <code>COMMISSION_MAX_PCT</code> ceiling already in config.</p>`
+        },
+        {
+          id: 'fills-log',
+          title: 'Fills log',
+          detail: `<p>Record requested price and size against filled price and size, per
+            order, appended to its own file.</p>
+          <p>This is the only way to measure <strong>real</strong> slippage rather than
+            the modelled half-spread. It closes the last open loop in the system: script 5
+            currently estimates cost from a live quote, and the fills log replaces that
+            estimate with what was actually paid. Until it exists, the cost figure feeding
+            the speed limit is a model, not a measurement.</p>`
+        },
+        {
+          id: 'capital-rule',
+          title: 'Capital update rule',
+          detail: `<p>Decide what <code>CAPITAL</code> means once the system is live:
+            the broker's NAV read each morning, or a figure set deliberately and changed
+            on purpose.</p>
+          <p>Reading NAV makes the live system compound automatically and de-risk after
+            losses, matching what script 6 already does internally. A fixed figure means
+            position sizes do not shrink after a drawdown, which is a different and more
+            aggressive policy. Script 6's internal compounding is unaffected either way
+            &mdash; this choice only governs the single number handed to the live sizing
+            call.</p>`
+        }
+      ]
+    },
+    {
+      num: 'phase 5',
+      title: 'Expansion',
+      gate: 'gated on capital, not on code',
+      items: [
+        {
+          id: 'speed-limit-test',
+          title: 'Speed-limit pre-test for any new rule',
+          detail: `<p>Before adding a rule, compute its turnover and the resulting
+            standardised cost
+            <code>(2 &times; C) / (&radic;256 &times; ICV)</code>, and reject it if the
+            portfolio total exceeds 0.13 SR/yr.</p>
+          <p>This is the test that rules out mean reversion at current size, and it is
+            cheap: turnover comes out of script 6 already, and the cost per share out of
+            script 5. Making it a gate rather than an afterthought means no rule gets
+            built and then discarded.</p>`
+        },
+        {
+          id: 'second-family',
+          title: 'A second rule family',
+          detail: `<p>A genuinely different signal, not another EWMAC span &mdash; the
+            three existing spans already correlate around 0.5&ndash;0.9 with each other,
+            which is why the FDM is only 1.07. A fourth span adds almost no
+            diversification.</p>
+          <p>Breakout is the natural candidate: different functional form, similar
+            holding period, and it passes the speed limit. The test is the item above plus
+            a forecast correlation below roughly 0.5 against the existing combined
+            forecast. Anything above that is paying costs for a signal already held.</p>`
+        },
+        {
+          id: 'futures-carry',
+          title: 'Futures and carry at USD 50&ndash;75k',
+          detail: `<p>Carry needs a term structure. Cash ETFs do not have one, which is
+            why carry cannot be built on the current universe at all. Gold, silver and
+            equity index <em>futures</em> do, and carry on them is close to free in
+            turnover terms &mdash; the signal changes slowly.</p>
+          <p>The constraint is size, not code. One MGC contract is roughly USD 11k
+            notional, so a diversified futures portfolio with sane position granularity
+            needs somewhere around USD 50&ndash;75k. Below that the rounding to whole
+            contracts destroys the risk targeting the whole framework depends on.</p>`
+        }
+      ]
+    }
+  ];
+
+  const REJECTED = [
+    {
+      title: 'Mean reversion at this account size',
+      detail: `<p>Three separate failures. <strong>Turnover</strong> of 50&ndash;200
+        against the 2.5&ndash;3&times; headroom the speed limit allows at SGD 10,000
+        &mdash; it fails the cost test by an order of magnitude, not a margin.
+        <strong>Skew</strong> of the wrong sign: frequent small gains and occasional large
+        losses, the mirror image of the trend system's profile, so it would concentrate
+        tail risk rather than diversify it. And the <strong>largest parameter surface</strong>
+        of any rule family, which is where overfitting lives.</p>
+      <p>Worth revisiting only if capital grows enough that the speed limit stops binding,
+        and then only with the pre-test in phase 5 applied first.</p>`
+    },
+    {
+      title: 'Carry on cash ETFs',
+      detail: `<p>The holding cost of an ETF is near-constant per instrument &mdash; an
+        expense ratio plus a roughly stable financing component. A constant produces a
+        fixed offset, not a varying signal, and no forecast can be derived from it. The
+        ranking between SPY, GLDM and SLV on this measure would never change, so the
+        "forecast" would be a static tilt wearing a rule's clothing.</p>
+      <p>Carry becomes available with futures (phase 5), where the term structure moves
+        and the signal genuinely varies.</p>`
+    },
+    {
+      title: '<code>ADJUSTED_LAST</code> for price history',
+      detail: `<p>Dividend-adjusted series are restated retroactively on every
+        distribution. Every download would silently change history, so no backtest could
+        be reproduced against an earlier one and no result could be attributed to a code
+        change rather than a data change.</p>
+      <p>The fix is the dividend handling in phase 0: keep the unadjusted
+        <code>TRADES</code> series, which only ever gets new rows appended, and add
+        distributions to the P&amp;L as discrete events on their ex-dates.</p>`
+    }
+  ];
+
+  const COLLECTION = 'checks';
+  const state = Object.create(null);
+  let db = null;
+  let writing = Object.create(null);
+
+  function el(tag, cls, html) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (html != null) n.innerHTML = html;
+    return n;
+  }
+
+  const boxes = Object.create(null);
+  const rows = Object.create(null);
+  let total = 0;
+
+  function render() {
+    const host = document.getElementById('phases');
+    let n = 0;
+    PHASES.forEach(phase => {
+      const sec = el('section', 'phase');
+      const head = el('div', 'phase-head');
+      head.appendChild(el('span', 'phase-num', phase.num));
+      head.appendChild(el('h2', null, phase.title));
+      head.appendChild(el('span', 'phase-gate', phase.gate));
+      sec.appendChild(head);
+
+      phase.items.forEach(item => {
+        n += 1;
+        const row = el('div', 'item' + (item.critical ? ' critical' : ''));
+
+        const box = el('input', 'box');
+        box.type = 'checkbox';
+        box.disabled = true;
+        box.setAttribute('aria-label', item.title);
+        box.addEventListener('change', () => toggle(item.id, box.checked));
+
+        const det = el('details');
+        const sum = el('summary');
+        sum.appendChild(el('span', 'caret', '&#9654;'));
+        sum.appendChild(el('span', 'idx', String(n).padStart(2, '0')));
+        sum.appendChild(el('span', 'title', item.title));
+        if (item.critical) sum.appendChild(el('span', 'pill', 'critical'));
+        det.appendChild(sum);
+        det.appendChild(el('div', 'detail', item.detail));
+
+        row.appendChild(box);
+        row.appendChild(det);
+        sec.appendChild(row);
+
+        boxes[item.id] = box;
+        rows[item.id] = row;
+      });
+
+      host.appendChild(sec);
+    });
+    total = n;
+
+    const rhost = document.getElementById('rejected');
+    REJECTED.forEach(r => {
+      const wrap = el('div', 'closed-item');
+      const det = el('details');
+      const sum = el('summary');
+      sum.appendChild(el('span', 'caret', '&#9654;'));
+      sum.appendChild(el('span', 'title', r.title));
+      det.appendChild(sum);
+      det.appendChild(el('div', 'detail', r.detail));
+      wrap.appendChild(det);
+      rhost.appendChild(wrap);
+    });
+  }
+
+  function paint() {
+    let done = 0;
+    Object.keys(boxes).forEach(id => {
+      const on = !!state[id];
+      if (on) done += 1;
+      boxes[id].checked = on;
+      rows[id].classList.toggle('done', on);
+    });
+    document.getElementById('count').textContent = String(done);
+    document.getElementById('fill').style.width =
+      (total ? (done / total) * 100 : 0) + '%';
+  }
+
+  function setStatus(text) {
+    document.getElementById('status').textContent = text;
+  }
+
+  async function toggle(id, on) {
+    state[id] = on;
+    paint();
+    if (!db) return;
+    if (writing[id]) { writing[id] = on; return; }
+    writing[id] = on;
+    while (writing[id] !== undefined) {
+      const want = writing[id];
+      try {
+        await db.collection(COLLECTION).doc(id)
+          .set({ done: want, at: new Date().toISOString() });
+      } catch (err) {
+        setStatus('could not save (' + (err && err.code ? err.code : 'error') + ')');
+        delete writing[id];
+        return;
+      }
+      if (writing[id] === want) { delete writing[id]; }
+    }
+  }
+
+  render();
+  paint();
+
+  (async () => {
+    db = await claude.use('db');
+    if (!db) {
+      setStatus('ticks not saved in this view');
+      return;
+    }
+    let first = true;
+    db.collection(COLLECTION).onSnapshot(snap => {
+      snap.docs.forEach(d => {
+        const body = d.data();
+        if (writing[d.id] === undefined) {
+          state[d.id] = !!(body && body.done);
+        }
+      });
+      paint();
+      if (first) {
+        first = false;
+        Object.keys(boxes).forEach(id => { boxes[id].disabled = false; });
+      }
+      setStatus('saved');
+    }, err => {
+      setStatus('sync lost (' + (err && err.code ? err.code : 'error') + ')');
+    });
+  })();
+</script>
+
+</body></html>
