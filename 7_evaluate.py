@@ -6,6 +6,9 @@ Evaluation statistics for the equity curve.
 
 Daily returns are net_pnl_t / equity_{t-1}. Sharpe is on raw returns, not excess. Skew carries SE = sqrt(6/n).
 
+The drag figures split sharpe_gross - sharpe_net into trading costs,
+financing and currency, applied in that order.
+
 Writes stats.csv, monthly_returns.csv, drawdown.csv and report.html to data/portfolio/.
 """
 
@@ -464,6 +467,9 @@ def write_report(path, df, net, monthly, grid, dd, stats, src):
               .replace('__PL__', str(PAD_L))
               .replace('__PR__', str(PAD_R)))
 
+    total_drag = (stats['cost_drag_sr'] + stats['financing_drag_sr']
+                  + stats['fx_drag_sr'])
+
     tiles = ''.join([
         tile('terminal equity', f"{equity.iloc[-1]:,.0f}",
              f"from {CAPITAL:,.0f} {HOME_CURRENCY}"),
@@ -473,9 +479,11 @@ def write_report(path, df, net, monthly, grid, dd, stats, src):
              f"{stats['sharpe_gross']:.2f} gross"),
         tile('max drawdown', f"{stats['max_drawdown']:.1%}",
              f"{stats['longest_drawdown_days']:.0f} days underwater"),
-        tile('cost drag', f"{stats['cost_drag_sr']:.3f}",
-             'SR/yr, limit 0.13'),
-    ])
+        tile('drag', f"{total_drag:.2f}",
+             f"SR/yr &middot; {stats['cost_drag_sr']:.2f} cost (limit 0.13), "
+             f"{stats['financing_drag_sr']:.2f} financing, "
+             f"{stats['fx_drag_sr']:.2f} fx"),
+            ])
 
     table = stats_table_html([
         ('window', f"{equity.index[0].date()} to {equity.index[-1].date()}"),
@@ -489,6 +497,11 @@ def write_report(path, df, net, monthly, grid, dd, stats, src):
          f"{VOL_TARGET:.0%})", f"{stats['annual_vol']:.2%}"),
         ('costs paid',
          f"{stats['costs_paid']:,.0f} ({stats['costs_per_year']:,.0f}/yr)"),
+        ('financing paid', 
+         f"{stats['financing_paid']:,.0f}  "
+         f"({stats['financing_per_year']:,.0f}/yr)"),
+        ('fx on the balance',
+         f"{stats['fx_pnl']:,.0f} ({stats['fx_per_year']:,.0f}/yr)"),
         ('dividends received', 
          f"{stats['dividends']:,.0f} ({stats['dividends_per_year']:,.0f}/yr)"),
         ('days underwater', f"{stats['pct_days_underwater']:.1%}"),
@@ -569,6 +582,21 @@ def main():
     costs_paid = df['cost'].sum()
     gross_profit = df['gross_pnl'].sum()
     income = df['dividend'].sum() if 'dividend' in df.columns else 0.0
+    financing_col = df['financing'] if 'financing' in df.columns else pd.Series(0.0, index=df.index)
+    fx_col = (df['fx_pnl'] if 'fx_pnl' in df.columns else pd.Series(0.0, index=df.index))
+    financing = financing_col.sum()
+    moved = fx_col.sum()
+
+    # gross -> after trading costs -> after financing -> after fx, so each drag is the 
+    # Sharpe given up at that step and the three add to sharpe_gross - sharpe_net
+    after_costs = returns_on_capital(df['gross_pnl'] - df['cost'], equity, CAPITAL)
+    after_financing = returns_on_capital(df['gross_pnl'] - df['cost'] - financing_col, equity, CAPITAL)
+    
+    sr_after_costs = sharpe(after_costs)
+    sr_after_financing = sharpe(after_financing)
+    cost_drag = sr_gross - sr_after_costs
+    financing_drag = sr_after_costs - sr_after_financing
+    fx_drag = sr_after_financing - sr_net
 
     print(f"{path}")
     print(f"window   {equity.index[0].date()} -> {equity.index[-1].date()}  "
@@ -586,12 +614,22 @@ def main():
     print("\nrisk-adjusted")
     print(f"  sharpe net      {sr_net:>8.2f}")
     print(f"  sharpe gross    {sr_gross:>8.2f}")
-    print(f"  cost drag       {sr_gross - sr_net:>8.2f} SR/yr   "
+    print(f"  cost drag       {cost_drag:>8.2f} SR/yr   "
           f"(speed limit 0.13)")
+    print(f"  financing drag  {financing_drag:>8.2f} SR/yr")
+    print(f"  fx drag         {fx_drag:>8.2f} SR/yr")
     share = (f", {costs_paid / gross_profit:.1%} of gross profit"
              if gross_profit > 0 else '')
     print(f"  costs paid      {costs_paid:>8,.0f} {HOME_CURRENCY}   "
           f"({costs_paid / years:,.0f}/yr{share})")
+
+    if financing:
+        print(f"  financing       {financing:>8,.0f} {HOME_CURRENCY}   "
+              f"({financing / years:,.0f}/yr)")
+
+    if moved:
+        print(f"  fx              {moved:>8,.0f} {HOME_CURRENCY}  "
+              f"({moved / years:,.0f}/yr on the whole balance)") 
 
     if income:
         part = (f", {income / gross_profit:.1%} of gross profit"
@@ -640,7 +678,13 @@ def main():
         'annual_vol': net.std() * ANNUALISE,
         'sharpe_net': sr_net,
         'sharpe_gross': sr_gross,
-        'cost_drag_sr': sr_gross - sr_net,
+        'cost_drag_sr': cost_drag,
+        'financing_drag_sr': financing_drag,
+        'financing_paid': financing,
+        'financing_per_year': financing / years,
+        'fx_drag_sr': fx_drag,
+        'fx_pnl': moved,
+        'fx_per_year': moved / years,
         'costs_paid': costs_paid,
         'costs_per_year': costs_paid / years,
         'dividends': income,

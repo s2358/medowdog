@@ -53,7 +53,7 @@ def allocation_csv():
 # each entry builds its argv lazily - the downloader creates the files the 
 # later steps glob for, so the paths cannot be resolved up front
 STEPS = [
-        ('fx rate',        lambda: ['fx_rate.py']),
+        ('fx data',        lambda: ['fx_data.py']),
         ('download',       lambda: ['1_ibkr_downloader.py'] + TICKERS),
         ('volatility',     lambda: ['2_volatility.py'] + instrument_csvs()),
         ('ewmac',          lambda: ['3_ewmac_calculator.py'] + instrument_csvs()),

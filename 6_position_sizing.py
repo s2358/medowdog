@@ -16,7 +16,9 @@ Dividends are read from data/dividends/ and credited to whatever position was
 held into each ex-date, net of US withholding - negative when the position was
 short. A ticker with no file there contributes nothing.
 
-The FX rate comes from the cache written by fx_rate.py.
+Margin financing is charged on the balance borrowed overnight - gross notional less equity, which assumes the account was converted to USD up front. The rate is the Fed funds effective rate from data/rates/ plus FINANCING_SPREAD, accrued actual/360 on calendar days, so a Friday position carries three days of interest into Monday.
+
+The loop runs in USD, because the account is funded by converting SGD up front. Each day's P&L, costs, financing and dividends are USD, and so is the equity the vol target is sized against. The home-currency curve is that equity at each day's rate, which exposes the whole balance to USDSGD, not just the day's flows - reported as its own fx_pnl line so the identity equity.diff() == net_pnl still holds exactly.
 """
 
 import os
@@ -26,13 +28,13 @@ import numpy as np
 import pandas as pd
 
 import dividends
-import fx_rate
+import fx_data
 from config import (CAPITAL, VOL_TARGET, HOME_CURRENCY, BUSINESS_DAYS,
-                    WARMUP, INERTIA, PORTFOLIO_DIR, COSTS_DIR, US_WITHHOLDING)
+                    WARMUP, INERTIA, US_WITHHOLDING, FINANCING_SPREAD, BENCHMARK_FILE, PORTFOLIO_DIR, COSTS_DIR)
 
 PER_TICKER_COLS = ('ivv', 'vol_scalar', 'subsystem_position',
                    'portfolio_position', 'rounded', 'held', 'trade',
-                   'notional_home', 'pnl', 'cost', 'dividend')
+                   'notional', 'pnl', 'cost', 'dividend')
 
 
 def ticker_from_path(path):
@@ -87,6 +89,36 @@ def load_income(tickers, index):
     return out, missing
 
 
+def load_financing(index, path=BENCHMARK_FILE):
+    """
+    Annual financing rate on each row, as a decimal.
+
+    FRED's DFF is in percent and covers every calendar day, but publishes a few days late, so the last rows forward-fill off the end of the file. IBKR Pro tier 1 charges this benchmark plus FINANCING_SPREAD.
+    """
+    raw = pd.read_csv(path, parse_dates=['observation_date'])
+    rate = raw.set_index('observation_date')['DFF'] / 100
+    aligned = rate.reindex(rate.index.union(index)).ffill().reindex(index)
+    if aligned.isna().any():
+        missing = aligned[aligned.isna()].index[0].date()
+        raise ValueError(f"{path} has no rate on or before {missing}")
+    return (aligned + FINANCING_SPREAD).values
+    
+
+def load_fx(index):
+    """
+    Home currency per unit of instrument currency on each row.
+
+    The pair trades on days the US equity market is shut, so the series is aligned to the backtest index and carried forward.
+    """
+    series = fx_data.load_series()
+    aligned = series.reindex(series.index.union(index)).ffill().reindex(index)
+    if aligned.isna().any():
+        missing = aligned[aligned.isna()].index[0].date()
+        raise ValueError(f"no FX rate on or before {missing} - "
+                         "run: python fx_data.py")
+    return aligned.values
+
+
 def round_half_away(x):
     """
     Round half away from zero. np.round uses banker's rounding, which sends
@@ -95,7 +127,7 @@ def round_half_away(x):
     return np.sign(x) * np.floor(np.abs(x) + 0.5)
 
 
-def run(frames, weights, idm, fx, capital0, vol_target, costs=None, income=None):
+def run(frames, weights, idm, fx, capital0, vol_target, costs=None, income=None, rates=None):
     """
     Walk the history day by day, compounding equity.
 
@@ -107,29 +139,42 @@ def run(frames, weights, idm, fx, capital0, vol_target, costs=None, income=None)
     index = frames[tickers[0]].index
     n = len(index)
 
+    if len(fx) != n:
+        raise ValueError(f"fx has {len(fx)} rows, the index has {n}")
+
     close = {t: frames[t]['close'].values for t in tickers}
     fcast = {t: frames[t]['combined_forecast'].values for t in tickers}
     icv = {t: frames[t]['icv'].values for t in tickers}
 
     income = income or {t: np.zeros(n) for t in tickers}
 
+    rate = rates if rates is not None else np.zeros(n)
+
+    # IBKR accrues actual/360 on the overnight balance every calendar day,
+    # so a Friday row carries three days of interest into Monday.
+    days = np.ones(n)
+    if n > 1:
+        days[1:] = np.diff(index.values).astype('timedelta64[D]').astype(float)
+
     cols = {t: {k: np.full(n, np.nan) for k in PER_TICKER_COLS}
             for t in tickers}
     equity = np.full(n, np.nan)
     gross_pnl = np.zeros(n)
     day_costs = np.zeros(n)
+    day_financing = np.zeros(n)
 
     cap = capital0
     held_prev = {t: 0.0 for t in tickers}
+    debt_prev = 0.0
     ruin_at = None
 
     for i in range(n):
         # 1. yesterday's position meets today's price, and is paid whatever went ex today
         total = 0.0
         for t in tickers:
-            p = (held_prev[t] * (close[t][i] - close[t][i - 1]) * fx
+            p = (held_prev[t] * (close[t][i] - close[t][i - 1])
                  if i > 0 else 0.0)
-            d = held_prev[t] * income[t][i] * fx
+            d = held_prev[t] * income[t][i]
             cols[t]['pnl'][i] = p
             cols[t]['dividend'][i] = d
             total += p + d
@@ -145,7 +190,7 @@ def run(frames, weights, idm, fx, capital0, vol_target, costs=None, income=None)
         spent = 0.0
 
         for t in tickers:
-            ivv = icv[t][i] * fx
+            ivv = icv[t][i]
             vol_scalar = daily_cash_vol_target / ivv if ivv > 0 else np.nan
             subsystem = fcast[t][i] / 10 * vol_scalar
             target = subsystem * weights[t] * idm
@@ -160,7 +205,7 @@ def run(frames, weights, idm, fx, capital0, vol_target, costs=None, income=None)
                 new = current
 
             trade = new - current
-            cost = abs(trade) * costs[t] * fx if costs and t in costs else 0.0
+            cost = abs(trade) * costs[t] if costs and t in costs else 0.0
 
             c = cols[t]
             c['ivv'][i] = ivv
@@ -170,16 +215,21 @@ def run(frames, weights, idm, fx, capital0, vol_target, costs=None, income=None)
             c['rounded'][i] = rounded
             c['held'][i] = new
             c['trade'][i] = trade
-            c['notional_home'][i] = new * close[t][i] * fx
+            c['notional'][i] = new * close[t][i]
             c['cost'][i] = cost
 
             spent += cost
             held_prev[t] = new
 
-        # 3. pay for the trades
+        # 3. pay for the trades, and for the money borrowed overnight
+        held_value = sum(abs(held_prev[t] * close[t][i]) for t in tickers)
+        charge = debt_prev * rate[i] / 360 * days[i]
+
         day_costs[i] = spent
-        cap -= spent
+        day_financing[i] = charge
+        cap -= spent + charge
         equity[i] = cap
+        debt_prev = max(0.0, held_value - cap)
 
     # if the account was wiped out, keep only the days that happened
     end = ruin_at if ruin_at is not None else n
@@ -193,18 +243,37 @@ def run(frames, weights, idm, fx, capital0, vol_target, costs=None, income=None)
         built[t] = df
 
     notional = pd.DataFrame(
-        {t: built[t]['notional_home'] for t in tickers}).abs().sum(axis=1)
+        {t: built[t]['notional'] for t in tickers}).abs().sum(axis=1)
 
     paid = pd.DataFrame({t: built[t]['dividend'] for t in tickers}).sum(axis=1)
 
+    # the account is USD, so the home-currency curve revalues the whole
+    # balance, not just the day's flows:
+    #   equity_home[i] - equity_home[i-1]
+    #       = net_pnl_usd[i] * conv[i] + equity_usd[i-1] * (conv[i] - conv[i-1])
+    # the second term is fx_pnl, and the two together make the difference exact
+
+    eq = equity[:end]
+    conv = fx[:end]
+    prev_eq = np.concatenate(([capital0], eq[:-1]))
+    prev_conv = np.concatenate(([conv[0]], conv[:-1]))
+    fx_pnl = prev_eq * (conv - prev_conv)   
+
+    gross = gross_pnl[:end] * conv
+    spent = day_costs[:end] * conv
+    charged = day_financing[:end] * conv
 
     portfolio = pd.DataFrame({
-        'gross_pnl': gross_pnl[:end],
-        'dividend': paid,
-        'cost': day_costs[:end],
-        'net_pnl': gross_pnl[:end] - day_costs[:end],
-        'equity': equity[:end],
-        'gross_notional': notional,
+        'gross_pnl': gross,
+        'dividend': paid * conv,
+        'cost': spent,
+        'financing': charged,
+        'fx_pnl': fx_pnl,
+        'net_pnl': gross - spent - charged + fx_pnl,
+        'equity': eq * conv,
+        'equity_usd': eq,
+        'fx': conv,
+        'gross_notional': notional * conv,
     }, index=index)
     portfolio['gross_leverage'] = (portfolio['gross_notional']
                                    / portfolio['equity'])
@@ -238,8 +307,8 @@ def main():
               "<instrument_csv> [<instrument_csv> ...]")
         sys.exit(1)
 
-    fx = fx_rate.load()
-    cached = fx_rate.describe()
+    spot = fx_data.load()
+    cached = fx_data.describe()
     costs, costs_file = load_costs()
 
     alloc_path, inst_paths = sys.argv[1], sys.argv[2:]
@@ -258,20 +327,30 @@ def main():
     frames = {t: df.loc[common] for t, df in frames.items()}
 
     income, no_file = load_income(sorted(frames), common)
+    rates = load_financing(common)
+    
+    fx = load_fx(common)
+    capital0 = CAPITAL / fx[0]
+
     counts = ', '.join(f"{t} {int((income[t] > 0).sum())}"
                        for t in sorted(income))
    
-    print(f"capital {CAPITAL:,.0f} {HOME_CURRENCY} (compounding)   "
+    print(f"capital {CAPITAL:,.0f} {HOME_CURRENCY} = {capital0:,.0f} USD "
+          f"at {fx[0]:.5f} (compounding)   "
           f"vol target {VOL_TARGET:.0%}   IDM {idm:.4f}")
-    print(f"fx {cached['pair']} {fx:.5f} (fetched {cached['fetched_at']})")
+    print(f"fx {cached['pair']} spot {spot:.5f} (fetched "
+          f"{cached['fetched_at']})   history {fx[0]:.5f} -> {fx[-1]:.5f}")
+
     print(f"costs: {costs_file if costs_file else 'not measured - gross only'}")
+    print(f"financing: benchmark + {FINANCING_SPREAD:.2%}, "
+          f"{rates.min():.2%} to {rates.max():.2%} over the window")
     print(f"dividends: {counts}"
           + (f"  (never fetched: {', '.join(no_file)})" if no_file else ''))
     print(f"window: {common[0].date()} -> {common[-1].date()}  "
           f"({len(common)} rows)\n")
 
     built, portfolio, ruin_at = run(
-        frames, weights, idm, fx, CAPITAL, VOL_TARGET, costs, income)
+        frames, weights, idm, fx, capital0, VOL_TARGET, costs, income, rates)
 
     if ruin_at is not None:
         print(f"*** account wiped out on {common[ruin_at].date()} "
@@ -294,6 +373,15 @@ def main():
     if costs:
         print(f"costs paid   {portfolio['cost'].sum():,.0f} {HOME_CURRENCY} "
               f"({portfolio['cost'].sum()/years:,.0f}/yr)")
+    fin = portfolio['financing'].sum()
+    if fin:
+        print(f"financing    {fin:,.0f} {HOME_CURRENCY}  "
+              f"({fin/years:,.0f}/yr)")
+
+    moved = portfolio['fx_pnl'].sum()
+    print(f"fx           {moved:,.0f} {HOME_CURRENCY}  "
+          f"({moved/years:,.0f}/yr on the whole balance)")
+
     paid = portfolio['dividend'].sum()
     if paid:
         print(f"dividends   {paid:,.0f} {HOME_CURRENCY}  "

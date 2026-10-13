@@ -1,15 +1,20 @@
 """
-Fetch and cache the FX rate.
+Spot rate and daily history for the FX pair.
 
-Run this to refresh: python fx_rate.py
-Read it from a script: from fx_rate import load
+    python fx_data.py                   # refresh both
+    from fx_data import load            # cached spot, to size today's position
+    from fx_data import load_series     # daily history, to convert past P&L
 
-The cache exists so that the backtest doesn't need IB gateway running. ib_async is imported inside fetch() for the same reason - reading the cached rate must not require the broker library to be installed.
+Two different jobs. The spot cache is the rate a position is sized at right now. The series is the rate each historical day's P&L was earned at.
+
+The cache exists so the backtest doesn't need IB Gateway running. ib_async is imported inside the fetch functions for the same reason - reading stored data must not require the broker library.
 """
 
 import json
 import datetime
-from config import (FX_PAIR, FX_CACHE, FX_MAX_AGE_DAYS, DATA_DIR, IB_HOST, IB_PORT, IB_MARKET_DATA_TYPE)
+import pandas as pd
+import bars
+from config import (FX_PAIR, FX_CACHE, FX_SERIES, FX_MAX_AGE_DAYS, DATA_DIR, IB_HOST, IB_PORT, IB_MARKET_DATA_TYPE)
 
 
 CLIENT_ID = 22
@@ -21,7 +26,7 @@ def load(path=FX_CACHE, max_age_days=FX_MAX_AGE_DAYS):
     Raises rather than silently returning a stale number - a wrong FX rate corrupts every position size     with no visible symptoms
     """
     if not path.exists():
-        raise FileNotFoundError(f"{path} not found - run: python fx_rate.py")
+        raise FileNotFoundError(f"{path} not found - run: python fx_data.py")
 
     data = json.loads(path.read_text())
     fetched = datetime.datetime.fromisoformat(data['fetched_at'])
@@ -30,7 +35,7 @@ def load(path=FX_CACHE, max_age_days=FX_MAX_AGE_DAYS):
     if age > max_age_days:
         raise ValueError(
                         f"{data['pair']} rate is {age} days old (fetched {data['fetched_at']}, "
-                        f"max {max_age_days}) - run: python fx_rate.py")
+                        f"max {max_age_days}) - run: python fx_data.py")
 
     return float(data['rate'])
 
@@ -77,7 +82,40 @@ def save(rate, bid, ask, pair=FX_PAIR, path=FX_CACHE):
         'fetched_at': datetime.datetime.now().isoformat(timespec='seconds'),
         }, indent=2))
 
-def main():
+
+def load_series(path=FX_SERIES):
+    """Daily rate of the pair, indexed by date."""
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found - run: python fx_data.py")
+    df = pd.read_csv(path, parse_dates=['date'])
+    return df.set_index('date')['rate']
+
+
+def fetch_series(pair=FX_PAIR):
+    """Daily bars for the pair, as (DataFrame, complete)."""
+    from ib_async import IB, Forex
+
+    ib = IB()
+    ib.connect(IB_HOST, IB_PORT, clientId=CLIENT_ID, readonly=True)
+    try:
+        contract = Forex(pair)
+        ib.qualifyContracts(contract)
+        # cash forex has no consolidated tape, so TRADES returns nothing.
+        # IDEALPRO runs Sunday 17:00 to Friday 17:00 ET, and useRTH=True cuts
+        # that down to a session the pair does not keep.
+        frame, complete = bars.daily(ib, contract, 'MIDPOINT', use_rth=False, label=pair)
+    finally:
+        ib.disconnect()
+
+    return frame[['date', 'close']].rename(columns={'close': 'rate'}), complete
+
+
+def save_series(frame, path=FX_SERIES):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(path, index=False)
+
+
+def refresh_spot():
     try:
         rate, bid, ask = fetch()
     except Exception as exc:
@@ -99,6 +137,37 @@ def main():
     print(f"{FX_PAIR}  bid {bid:.5f}  ask {ask:.5f}  mid {rate:.5f}  "
           f"spread {spread_bp:.1f} bp")
     print(f"written to {FX_CACHE}")
+
+
+def refresh_series():
+    try:
+        frame, complete = fetch_series()
+    except Exception as exc:
+        if not FX_SERIES.exists():
+            raise
+        print(f"series fetch failed: {exc}")
+        print(f"keeping {FX_SERIES}")
+        return
+
+    if not complete:
+        if not FX_SERIES.exists():
+            raise RuntimeError(
+                    f"{FX_PAIR} download did not reach the start of the history "
+                    f"and there is no stored series to keep")
+        print(f"{FX_PAIR} NOT SAVED - the walk did not reach the start of "
+              f"the history, keeping {FX_SERIES}")
+        return
+
+    save_series(frame)
+    print(f"{FX_PAIR}  {len(frame):5d} daily bars {frame['date'].iloc[0]} -> "
+          f"{frame['date'].iloc[-1]}  written to {FX_SERIES}")
+
+
+def main():
+    refresh_spot()
+    refresh_series()
+
+
 
 if __name__ == '__main__':
     main()

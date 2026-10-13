@@ -21,7 +21,13 @@ HOME_CURRENCY = 'SGD'
 
 # --- fx ---
 FX_PAIR = 'USDSGD'      # home currency per unit of instrument currency
+FX_SERIES = DATA_DIR / 'fx' / f'{FX_PAIR}.csv'
 FX_MAX_AGE_DAYS = 7
+
+# --- rates ---
+RATES_DIR = DATA_DIR / 'rates'
+BENCHMARK_FILE = RATES_DIR / 'usd_benchmark.csv'
+FINANCING_SPREAD = 0.015
 
 # --- dividends ---
 DIVIDEND_MAX_AGE_DAYS = 90

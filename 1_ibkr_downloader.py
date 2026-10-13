@@ -3,58 +3,28 @@ Download daily bars from IB Gateway.
     python 1_ibkr_downloader.py SPY GLDM SLV
 
 Each run writes data/<TICKER>/<TICKER>_<timestamp>.csv and moves any previous download into data/<TICKER>/archive/. The live folder therefore always holds exactly one file per ticker, so data/<TICKER>/*.csv is unambiguous, while every earlier download is kept.
+
+A download that does not reach the start of the available history is not saved, so the previous file stays live.
 """
 
 import argparse
 import sys
-from datetime import datetime, timezone
-from ib_async import IB, Stock, util
+from datetime import datetime
+from ib_async import IB, Stock
+import bars
 from config import IB_HOST, IB_PORT, DATA_DIR
 
 CLIENT_ID = 1
-CHUNK = "25 Y"        # Longest duration IB Gateway has accepted in testing (34 Y was rejected)
 
 def download(ib, ticker):
-    """Page backwards through history until the earliest available bar."""
+    """Daily bars for one ticker, as (DataFrame, complete). """
     contract = Stock(ticker, "SMART", "USD")
     ib.qualifyContracts(contract)
     if not contract.conId:
         raise ValueError(f"could not resolve contract for {ticker}")
 
-    head = ib.reqHeadTimeStamp(contract, whatToShow="TRADES", useRTH=True, formatDate=2)
+    return bars.daily(ib, contract, "TRADES", label=ticker)
 
-    all_bars = []
-    end = ""
-    previous_first = None
-
-    while True:
-        bars = ib.reqHistoricalData(
-            contract,
-            endDateTime=end,
-            durationStr=CHUNK,
-            barSizeSetting="1 day",
-            whatToShow="TRADES",
-            useRTH=True,
-            formatDate=1,
-        )
-        if not bars:
-            break
-
-        all_bars = bars + all_bars
-        first = bars[0].date
-
-        if first <= head.date():
-            break
-        if previous_first is not None and first >= previous_first:
-            # not moving backwards - stop rather than loop forever
-            print(f"  {ticker}: pagination stalled at {first}, stopping")
-            break
-        previous_first = first
-
-        # next request ends at the start of the earliest day received
-        end = datetime(first.year, first.month, first.day, tzinfo=timezone.utc)
-
-    return all_bars
 
 def archive_previous(out_dir, ticker):
     """Move earlier downloads aside so the live folder holds only the newest."""
@@ -68,9 +38,7 @@ def archive_previous(out_dir, ticker):
         path.rename(archive_dir / path.name)
     return len(old)
 
-def save(ticker, bars):
-    df = util.df(bars).drop_duplicates(subset="date").sort_values("date")
-
+def save(ticker, df):
     out_dir = DATA_DIR / ticker
     out_dir.mkdir(parents=True, exist_ok=True)
     moved = archive_previous(out_dir, ticker)
@@ -98,18 +66,20 @@ def main():
         for ticker in args.tickers:
             ticker = ticker.upper()
             try:
-                bars = download(ib, ticker)
+                frame, complete = download(ib, ticker)
             except Exception as exc:
                 print(f"{ticker:6s} FAILED: {exc}")
                 failed.append(ticker)
                 continue
 
-            if not bars:
-                print(f"{ticker:6s} no data returned")
+            if not complete:
+                print(f"{ticker:6s} NOT SAVED - bars start "
+                      f"{frame['date'].iloc[0]} and the walk did not reach "
+                      f"the start of the history")
                 failed.append(ticker)
                 continue
 
-            save(ticker, bars)
+            save(ticker, frame)
     finally:
         ib.disconnect()
 

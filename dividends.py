@@ -18,38 +18,23 @@ This is the only script that touches ADJUSTED_LAST, and it keeps nothing but
 the extracted dividends, so the price history stays unadjusted and a rerun
 never restates it.
 
-A short answer here is indistinguishable from a correct one, so nothing is
-written unless the bars reach back to the start of the backtest window - the latest price history start among the instruments in WEIGHTS. An empty
-request means a timeout or a pacing violation unless reqHeadTimeStamp says the
-contract's history really has run out.
+A short answer here is indistinguishable from a correct one, so nothing is written unless the bars reach back to the start of the backtest window - the latest price history start among the instruments in WEIGHTS. bars.py walks the history and reports whether it reached the start.
 
 Writes data/dividends/<TICKER>.csv and _fetched.json.
 """
 
 import json
 import sys
-from datetime import datetime, timedelta, timezone
-
+from datetime import datetime, timedelta
 import pandas as pd
-
+import bars
 from config import (WEIGHTS, DATA_DIR, DIVIDENDS_DIR, DIVIDEND_MAX_AGE_DAYS,
                     IB_HOST, IB_PORT)
 
-# IB Gateway serves 25 Y of daily bars
-CHUNK = '25 Y'
-MAX_CHUNKS = 4
 
 # a ratio step below this is rounding noise in IBKR's adjusted prices, not a
 # distribution. SPY pays around 30 bp a quarter, so the gap is wide.
 MIN_YIELD = 0.0005
-
-# IBKR allows 60 historical requests per 10 minutes.  Well clear of it at one request per series
-# The pause costs nothing if a run ever does page.
-PAUSE = 1.0
-RETRY_PAUSE = 10.0
-
-# a contract whose first bar is within this of its head timestamp is complete
-HEAD_TOLERANCE = pd.Timedelta(days=7)
 
 STAMPS = DIVIDENDS_DIR / '_fetched.json'
 
@@ -149,87 +134,13 @@ def implied_dividends(trades, adjusted, min_yield=MIN_YIELD):
     out.index.name = 'ex_date'
     return out
 
-def head_timestamp(ib, contract, what):
-    """Earliest bar IBKR has for this contract, or None if it will not say."""
-    try:
-        stamp = ib.reqHeadTimeStamp(contract, whatToShow=what, useRTH=True,
-                                    formatDate=2)
-    except Exception as exc:
-        print(f"  {contract.symbol} {what}: no head timestamp ({exc})")
-        return None
-    if stamp is None:
-        print(f"  {contract.symbol} {what}: no head timestamp")
-        return None
-    return pd.Timestamp(stamp).tz_localize(None)
 
 
-def history(ib, contract, what, pause=PAUSE):
-    """
-    Daily bars, oldest first.
-
-    Returns (series, complete). complete is False when a request came back
-    empty twice and the bars do not reach the contract's head timestamp - a
-    timeout or a pacing violation, not the end of the history. The caller
-    must not store an incomplete answer.
-    """
-    from ib_async import util
-
-    head = head_timestamp(ib, contract, what)
-    frames, end, previous_first, complete = [], '', None, False
-
-    for _ in range(MAX_CHUNKS):
-        bars = ib.reqHistoricalData(
-            contract,
-            endDateTime=end,
-            durationStr=CHUNK,
-            barSizeSetting='1 day',
-            whatToShow=what,
-            useRTH=True,
-            formatDate=1,
-            timeout=120,
-        )
-        if not bars:
-            # empty is ambiguous: end of history, or a timeout. Pause and ask
-            # once more before believing it.
-            ib.sleep(RETRY_PAUSE)
-            bars = ib.reqHistoricalData(
-                contract,
-                endDateTime=end,
-                durationStr=CHUNK,
-                barSizeSetting='1 day',
-                whatToShow=what,
-                useRTH=True,
-                formatDate=1,
-                timeout=120,
-            )
-        if not bars:
-            break          # still empty: ambiguous, complete stays False
-
-        df = util.df(bars)[['date', 'close']]
-        first = pd.Timestamp(df['date'].iloc[0])
-        if previous_first is not None and first >= previous_first:
-            complete = True       # the window stopped moving - no more history
-            break
-        previous_first = first
-        frames.append(df)
-
-        if head is not None and first <= head + HEAD_TOLERANCE:
-            complete = True       # reached the contract's first bar
-            break
-
-        #Ib wants an explicit timezone - a naive datetime is read as local
-        # time and shifts the window by the UTC offset
-        end = datetime(first.year, first.month, first.day, tzinfo=timezone.utc)
-        ib.sleep(pause)
-    else:
-        complete = True           # ran out of chunks
-
-    if not frames:
-        raise RuntimeError(f"no {what} bars returned for {contract.symbol}")
-
-    out = pd.concat(frames, ignore_index=True)
-    out['date'] = pd.to_datetime(out['date']).dt.tz_localize(None).dt.normalize()
-    out = out.drop_duplicates('date').sort_values('date')
+def close_series(ib, contract, what):
+    """Daily closes, date-indexed, as (Series, complete)."""
+    frame, complete = bars.daily(ib, contract, what)
+    out = frame[['date', 'close']].copy()
+    out['date'] = pd.to_datetime(out['date'])
     return out.set_index('date')['close'], complete
 
 
@@ -250,10 +161,10 @@ def fetch(tickers, host=IB_HOST, port=IB_PORT):
             contract = Stock(ticker, 'SMART', 'USD')
             ib.qualifyContracts(contract)
 
-            trades, ok_t = history(ib, contract, 'TRADES')
-            ib.sleep(PAUSE)
-            adjusted, ok_a = history(ib, contract, 'ADJUSTED_LAST')
-            ib.sleep(PAUSE)
+            trades, ok_t = close_series(ib, contract, 'TRADES')
+            ib.sleep(bars.PAUSE)
+            adjusted, ok_a = close_series(ib, contract, 'ADJUSTED_LAST')
+            ib.sleep(bars.PAUSE)
 
             results[ticker] = {
                 'dividends': implied_dividends(trades, adjusted),
@@ -280,7 +191,7 @@ def verdict(result, needed):
 def main():
     tickers = [t.upper() for t in sys.argv[1:]] or sorted(WEIGHTS)
     print(f"deriving dividends for {', '.join(tickers)} "
-          f"({CHUNK}, TRADES vs ADJUSTED_LAST)\n")
+          f"({bars.CHUNK}, TRADES vs ADJUSTED_LAST)\n")
 
     starts = [price_start(t) for t in sorted(WEIGHTS)]
     starts = [d for d in starts if d is not None]
