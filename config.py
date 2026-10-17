@@ -70,7 +70,7 @@ COMMISSION_MAX_PCT = 0.01   # capped at 1% of trade value
 US_WITHHOLDING = 0.30
 
 # --- backtest window (None means all available rows) ---
-WINDOW_START = '2023-11-27'
+WINDOW_START = None
 WINDOW_END = None
 
 
