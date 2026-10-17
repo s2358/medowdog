@@ -9,13 +9,16 @@ Daily returns are net_pnl_t / equity_{t-1}. Sharpe is on raw returns, not excess
 The drag figures split sharpe_gross - sharpe_net into trading costs,
 financing and currency, applied in that order.
 
-Writes stats.csv, monthly_returns.csv, drawdown.csv and report.html to data/portfolio/.
+Writes stats, monthly_returns, drawdown and report files to data/portfolio/,
+named after the source file and the time of the run.
 """
 
 import json
 import sys
 import numpy as np
 import pandas as pd
+from datetime import datetime
+from pathlib import Path
 from config import (CAPITAL, VOL_TARGET, HOME_CURRENCY, BUSINESS_DAYS, PORTFOLIO_DIR)
 
 ANNUALISE = np.sqrt(BUSINESS_DAYS)
@@ -121,6 +124,19 @@ def monthly_grid(monthly):
     grid['year'] = [((1 + monthly[monthly.index.year == y]).prod() - 1) * 100
                     for y in grid.index]
     return grid
+
+
+def archive_previous(out_dir, pattern='stats_*.csv'):
+    """Move earlier files matching the pattern into archive/"""
+    old = sorted(out_dir.glob(pattern))
+    if not old:
+        return 0
+
+    archive_dir = out_dir / 'archive'
+    archive_dir.mkdir(exist_ok=True)
+    for path in old:
+        path.rename(archive_dir / path.name)
+    return len(old)
 
 
 # --------------------------------------------------------------- html report
@@ -584,6 +600,8 @@ def main():
     income = df['dividend'].sum() if 'dividend' in df.columns else 0.0
     financing_col = df['financing'] if 'financing' in df.columns else pd.Series(0.0, index=df.index)
     fx_col = (df['fx_pnl'] if 'fx_pnl' in df.columns else pd.Series(0.0, index=df.index))
+    capped = (df['capped'].astype(bool) if 'capped' in df.columns
+              else pd.Series(False, index=df.index))
     financing = financing_col.sum()
     moved = fx_col.sum()
 
@@ -685,6 +703,8 @@ def main():
         'fx_drag_sr': fx_drag,
         'fx_pnl': moved,
         'fx_per_year': moved / years,
+        'capped_days': int(capped.sum()),
+        'capped_fraction': float(capped.mean()),
         'costs_paid': costs_paid,
         'costs_per_year': costs_paid / years,
         'dividends': income,
@@ -701,14 +721,29 @@ def main():
         stats[f"skew_{s['horizon']}_se"] = s['se']
 
     PORTFOLIO_DIR.mkdir(parents=True, exist_ok=True)
-    pd.Series(stats, name='value').rename_axis('statistic').to_csv(
-        PORTFOLIO_DIR / 'stats.csv')
-    grid.to_csv(PORTFOLIO_DIR / 'monthly_returns.csv')
-    dd['curve'].rename('drawdown').to_csv(PORTFOLIO_DIR / 'drawdown.csv')
-    write_report(PORTFOLIO_DIR / 'report.html', df, net, monthly, grid, dd,
-                 stats, f"generated from {path}")
-    print(f"\nwritten to {PORTFOLIO_DIR}/ "
-          "(stats.csv, monthly_returns.csv, drawdown.csv, report.html)")
+    stem = Path(path).stem
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    # one set of outputs per source file, so the benchmark and the system
+    # never overwrite each other
+    archived = sum(archive_previous(PORTFOLIO_DIR, f'{name}_{stem}_*.{ext}')
+                   for name, ext in (('stats', 'csv'),
+                                     ('monthly_returns', 'csv'),
+                                     ('drawdown', 'csv'),
+                                     ('report', 'html')))
+
+    stats_path = PORTFOLIO_DIR / f'stats_{stem}_{stamp}.csv'
+    pd.Series(stats, name='value').rename_axis('statistic').to_csv(stats_path)
+    grid.to_csv(PORTFOLIO_DIR / f'monthly_returns_{stem}_{stamp}.csv')
+    dd['curve'].rename('drawdown').to_csv(
+        PORTFOLIO_DIR / f'drawdown_{stem}_{stamp}.csv')
+    report_path = PORTFOLIO_DIR / f'report_{stem}_{stamp}.html'
+    write_report(report_path, df, net, monthly, grid, dd, stats,
+                 f"generated from {path}")
+
+    note = f"  ({archived} archived)" if archived else ""
+    print(f"\nwritten to {PORTFOLIO_DIR}/ ({stats_path.name}, "
+          f"{report_path.name} and 2 more){note}")
 
 
 if __name__ == '__main__':

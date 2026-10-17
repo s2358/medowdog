@@ -18,6 +18,8 @@ short. A ticker with no file there contributes nothing.
 
 Margin financing is charged on the balance borrowed overnight - gross notional less equity, which assumes the account was converted to USD up front. The rate is the Fed funds effective rate from data/rates/ plus FINANCING_SPREAD, accrued actual/360 on calendar days, so a Friday position carries three days of interest into Monday.
 
+Gross leverage is capped at MAX_LEVERAGE. The broker's limit applies to the whole portfolio, so it can only be checked once every instrument has been sized - a second pass scales every position by the same factor and re-rounds. Whole block means the result lands near the cap rather than exactly on it.
+
 The loop runs in USD, because the account is funded by converting SGD up front. Each day's P&L, costs, financing and dividends are USD, and so is the equity the vol target is sized against. The home-currency curve is that equity at each day's rate, which exposes the whole balance to USDSGD, not just the day's flows - reported as its own fx_pnl line so the identity equity.diff() == net_pnl still holds exactly.
 """
 
@@ -30,7 +32,8 @@ import pandas as pd
 import dividends
 import fx_data
 from config import (CAPITAL, VOL_TARGET, HOME_CURRENCY, BUSINESS_DAYS,
-                    WARMUP, INERTIA, US_WITHHOLDING, FINANCING_SPREAD, BENCHMARK_FILE, PORTFOLIO_DIR, COSTS_DIR)
+                    WARMUP, INERTIA, US_WITHHOLDING, FINANCING_SPREAD, MAX_LEVERAGE, 
+                    WINDOW_START, WINDOW_END, BENCHMARK_FILE, PORTFOLIO_DIR, COSTS_DIR)
 
 PER_TICKER_COLS = ('ivv', 'vol_scalar', 'subsystem_position',
                    'portfolio_position', 'rounded', 'held', 'trade',
@@ -127,7 +130,7 @@ def round_half_away(x):
     return np.sign(x) * np.floor(np.abs(x) + 0.5)
 
 
-def run(frames, weights, idm, fx, capital0, vol_target, costs=None, income=None, rates=None):
+def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None, income=None, rates=None):
     """
     Walk the history day by day, compounding equity.
 
@@ -162,6 +165,8 @@ def run(frames, weights, idm, fx, capital0, vol_target, costs=None, income=None,
     gross_pnl = np.zeros(n)
     day_costs = np.zeros(n)
     day_financing = np.zeros(n)
+    day_capped = np.zeros(n, dtype=bool)
+    day_scale = np.ones(n)
 
     cap = capital0
     held_prev = {t: 0.0 for t in tickers}
@@ -187,7 +192,7 @@ def run(frames, weights, idm, fx, capital0, vol_target, costs=None, income=None,
 
         # 2. size today's positions against the equity we now hold
         daily_cash_vol_target = cap * vol_target / np.sqrt(BUSINESS_DAYS)
-        spent = 0.0
+        want = {}
 
         for t in tickers:
             ivv = icv[t][i]
@@ -199,13 +204,9 @@ def run(frames, weights, idm, fx, capital0, vol_target, costs=None, income=None,
             current = held_prev[t]
             if np.isfinite(rounded):
                 denom = max(abs(current), 1.0)
-                new = rounded if abs(rounded - current) / denom > INERTIA \
-                    else current
+                new = rounded if abs(rounded - current) / denom > INERTIA else current
             else:
                 new = current
-
-            trade = new - current
-            cost = abs(trade) * costs[t] if costs and t in costs else 0.0
 
             c = cols[t]
             c['ivv'][i] = ivv
@@ -213,6 +214,31 @@ def run(frames, weights, idm, fx, capital0, vol_target, costs=None, income=None,
             c['subsystem_position'][i] = subsystem
             c['portfolio_position'][i] = target
             c['rounded'][i] = rounded
+            want[t] = new
+
+        # 2b. The broker will not carry more than max_leverage x equity overnight,
+        # and the limit is on the portfolio, so it can only be applied now that 
+        # every instrument has been sized.
+        wanted = sum(abs(want[t] * close[t][i]) for t in tickers)
+        scale = 1.0
+        if wanted > max_leverage * cap:
+            scale = max_leverage * cap / wanted
+            for t in tickers:
+                want[t] = round_half_away(want[t] * scale)
+
+        day_capped[i] = scale < 1.0
+        day_scale[i] = scale
+
+        # 2c. Pay for the trades the capped positions imply, not the ones the 
+        # forecast asked for.
+        spent = 0.0
+        for t in tickers:
+            new = want[t]
+            current = held_prev[t]
+            trade = new - current
+            cost = abs(trade) * costs[t] if costs and t in costs else 0.0
+
+            c = cols[t]
             c['held'][i] = new
             c['trade'][i] = trade
             c['notional'][i] = new * close[t][i]
@@ -220,7 +246,7 @@ def run(frames, weights, idm, fx, capital0, vol_target, costs=None, income=None,
 
             spent += cost
             held_prev[t] = new
-
+      
         # 3. pay for the trades, and for the money borrowed overnight
         held_value = sum(abs(held_prev[t] * close[t][i]) for t in tickers)
         charge = debt_prev * rate[i] / 360 * days[i]
@@ -268,6 +294,8 @@ def run(frames, weights, idm, fx, capital0, vol_target, costs=None, income=None,
         'dividend': paid * conv,
         'cost': spent,
         'financing': charged,
+        'capped': day_capped[:end],
+        'cap_scale': day_scale[:end],
         'fx_pnl': fx_pnl,
         'net_pnl': gross - spent - charged + fx_pnl,
         'equity': eq * conv,
@@ -324,6 +352,14 @@ def main():
     common = None
     for df in frames.values():
         common = df.index if common is None else common.intersection(df.index)
+
+    if WINDOW_START is not None:
+        common = common[common >= pd.Timestamp(WINDOW_START)]
+    if WINDOW_END is not None:
+        common = common[common < pd.Timestamp(WINDOW_END)]
+    if len(common) == 0:
+        raise ValueError("the configured window leaves no rows")
+
     frames = {t: df.loc[common] for t, df in frames.items()}
 
     income, no_file = load_income(sorted(frames), common)
@@ -350,7 +386,7 @@ def main():
           f"({len(common)} rows)\n")
 
     built, portfolio, ruin_at = run(
-        frames, weights, idm, fx, capital0, VOL_TARGET, costs, income, rates)
+        frames, weights, idm, fx, capital0, VOL_TARGET, MAX_LEVERAGE, costs, income, rates)
 
     if ruin_at is not None:
         print(f"*** account wiped out on {common[ruin_at].date()} "
@@ -369,7 +405,8 @@ def main():
           f"min {equity.min():,.0f}   max {equity.max():,.0f} {HOME_CURRENCY}")
     print(f"gross leverage   mean {lev.mean():.2f}x   "
           f"median {lev.median():.2f}x   max {lev.max():.2f}x   "
-          f"days over 2x: {(lev > 2).mean():.1%}")
+          f"cap {MAX_LEVERAGE:.0f}x binds on {portfolio['capped'].mean():.1%} "
+          f"of days")
     if costs:
         print(f"costs paid   {portfolio['cost'].sum():,.0f} {HOME_CURRENCY} "
               f"({portfolio['cost'].sum()/years:,.0f}/yr)")

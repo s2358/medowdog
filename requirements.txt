@@ -1,18 +1,22 @@
-# Medowdog — direct dependencies.
-# Install:  .venv/bin/pip install -r requirements.txt
-# Lock:     .venv/bin/pip freeze > requirements.lock.txt
-
-# IBKR API client (maintained successor to the archived ib_insync)
-ib_async>=1.0
-
-# Numerics used by the backtest engine and the data loader
-numpy>=1.26
-pandas>=2.1
-scipy>=1.11
-
-# NYSE/NASDAQ trading calendars — used by the loader to distinguish a real
-# data gap from a market holiday
-pandas_market_calendars>=5.0
-
-# Tests
-pytest>=8.0
+aeventkit==2.1.0
+bc-utils==0.1.8
+beautifulsoup4==4.15.0
+eventkit==1.0.3
+greenlet==3.5.6
+humanization-playwright==0.1.2
+ib-insync==0.9.86
+ib_async==2.1.0
+loguru==0.7.3
+nest-asyncio==1.6.0
+numpy==1.26.4
+pandas==2.3.3
+patchright==1.63.0
+playwright==1.63.0
+pyee==13.0.1
+python-dateutil==2.9.0.post0
+pytz==2026.3.post1
+PyYAML==6.0.3
+six==1.17.0
+soupsieve==2.10
+typing_extensions==4.16.0
+tzdata==2025.3

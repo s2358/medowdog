@@ -13,10 +13,11 @@ PORTFOLIO_DIR = DATA_DIR / 'portfolio'
 COSTS_DIR = DATA_DIR / 'costs'
 FX_CACHE = DATA_DIR / 'fx_rate.json'
 DIVIDENDS_DIR = DATA_DIR / 'dividends'
+FITTED_DIR = DATA_DIR / 'fitted'
 
 # --- account ---
 CAPITAL = 10000.0       # home currency (SGD)
-VOL_TARGET = 0.30
+VOL_TARGET = 0.20
 HOME_CURRENCY = 'SGD'
 
 # --- fx ---
@@ -29,6 +30,10 @@ RATES_DIR = DATA_DIR / 'rates'
 BENCHMARK_FILE = RATES_DIR / 'usd_benchmark.csv'
 FINANCING_SPREAD = 0.015
 
+# --- leverage ---
+# Reg T sets 25% overnight maintenance, so 4x is where IBKR liquidates rather than margin calls
+MAX_LEVERAGE = 4.0
+
 # --- dividends ---
 DIVIDEND_MAX_AGE_DAYS = 90
 
@@ -39,7 +44,7 @@ IB_MARKET_DATA_TYPE = 3 # 1 live, 3 delayed
 
 # --- framework parameters ---
 VOL_WINDOW = 30     # rolling window for the sanity-check vol
-VOL_LAMBDA = 0.94   # EWMA decay; span = 2/(1-lambda) - 1 ~32 days
+VOL_LAMBDA = 0.9459   # EWMA decay; span = 2/(1-lambda) - 1 ~32 days
 BUSINESS_DAYS = 256
 WARMUP = 256            # slowest EWMA span
 
@@ -49,9 +54,10 @@ WEIGHTS = {'SPY': 0.40, 'GLDM': 0.30, 'SLV': 0.30}
 FORECAST_CAP = 20
 FORECAST_SCALARS = {'16_64': 3.75, '32_128': 2.65, '64_256': 1.87}
 FORECAST_WEIGHTS = {'16_64': 0.42, '32_128': 0.16, '64_256': 0.42}
-FDM = 1.07              # forecast diversification multiplier
+FDM = 1.099              # forecast diversification multiplier
 
 IDM_CAP = 2.5           # instrument diversification multiplier ceiling
+FDM_CAP = 2.5           # forecast diversification multiplier ceiling
 INERTIA = 0.10         # don't trade if the gap is under 10%
 SPEED_LIMIT_SR = 0.13   # max annual cost in Sharpe ratio units
 
@@ -63,7 +69,9 @@ COMMISSION_MAX_PCT = 0.01   # capped at 1% of trade value
 # --- tax? ---
 US_WITHHOLDING = 0.30
 
-
+# --- backtest window (None means all available rows) ---
+WINDOW_START = '2023-11-27'
+WINDOW_END = None
 
 
 
