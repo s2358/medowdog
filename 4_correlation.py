@@ -15,11 +15,9 @@ import pandas as pd
 import numpy as np
 import os
 import sys
-from config import (WEIGHTS, IDM_CAP, WARMUP, BUSINESS_DAYS, CORRELATIONS_DIR)
+from config import (IDM_CAP, WARMUP, BUSINESS_DAYS, CORRELATIONS_DIR, WINDOW_START, WINDOW_END)
+from universe import WEIGHTS, ticker_from_path
 
-def ticker_from_path(path):
-    """trim the filename to retain only the ticker."""
-    return os.path.basename(path).split('_')[0].upper()
 
 def load_subsystem_returns(path):
     df = pd.read_csv(path, usecols=['date', 'subsystem_returns'])
@@ -27,13 +25,30 @@ def load_subsystem_returns(path):
     df['date'] = pd.to_datetime(df['date'])
     return df.set_index('date')['subsystem_returns'].rename(ticker_from_path(path))
 
+
 def build_panel(paths):
+    """
+    The aligned panel of subsystem returns, restricted to the backtest window.
+
+    The window matters here: the multiplier is an estimate from the data, so
+    an out-of-sample run must not compute it from rows the run is pretending
+    not to have seen.
+    """
     series = [load_subsystem_returns(p) for p in paths]
     names = [s.name for s in series]
     duplicates = {n for n in names if names.count(n) > 1}
     if duplicates:
         raise ValueError(f"same ticker given more than once: {sorted(duplicates)}")
-    return pd.concat(series, axis=1, join='inner').dropna()
+    panel = pd.concat(series, axis=1, join='inner').dropna()
+
+    if WINDOW_START is not None:
+        panel = panel[panel.index >= pd.Timestamp(WINDOW_START)]
+    if WINDOW_END is not None:
+        panel = panel[panel.index < pd.Timestamp(WINDOW_END)]
+    if panel.empty:
+        raise ValueError("the configured window leaves no rows")
+    return panel
+
 
 def correlation_matrix(panel, floor_negatives=True):
     H = panel.corr()

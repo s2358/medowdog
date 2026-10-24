@@ -9,21 +9,28 @@ A download that does not reach the start of the available history is not saved, 
 
 import argparse
 import sys
-from datetime import datetime
-from ib_async import IB, Stock
+from datetime import datetime, time
+from ib_async import IB
 import bars
+import universe
 from config import IB_HOST, IB_PORT, DATA_DIR
 
 CLIENT_ID = 1
+SESSION_CLOSE = {'STK': time(16, 0), 'FUT': time(17, 0)}
 
 def download(ib, ticker):
-    """Daily bars for one ticker, as (DataFrame, complete). """
-    contract = Stock(ticker, "SMART", "USD")
+    """
+    Daily bars for one ticker, as (DataFrame, complete). 
+    
+    A future trades nearly around the clock, so its daily bar is taken from the whole session rather than the hours an equity exchange keeps.
+    """
+    contract = universe.contract(ticker)
     ib.qualifyContracts(contract)
     if not contract.conId:
         raise ValueError(f"could not resolve contract for {ticker}")
 
-    return bars.daily(ib, contract, "TRADES", label=ticker)
+    use_rth = universe.instrument(ticker)['type'] == 'STK'
+    return bars.daily(ib, contract, "TRADES", use_rth=use_rth, label=ticker)
 
 
 def archive_previous(out_dir, ticker):
@@ -78,6 +85,11 @@ def main():
                       f"the start of the history")
                 failed.append(ticker)
                 continue
+
+            closes_at = SESSION_CLOSE[universe.instrument(ticker)['type']]
+            frame, dropped = bars.drop_unsettled(frame, closes_at)
+            if dropped is not None:
+                print(f"{ticker:6s} dropped the unsettled {dropped} bar")
 
             save(ticker, frame)
     finally:

@@ -15,13 +15,11 @@ import os
 import sys
 import numpy as np
 import pandas as pd
+import capital
 import dividends
 import fx_data
-from config import (CAPITAL, HOME_CURRENCY, BUSINESS_DAYS, WARMUP, US_WITHHOLDING, PORTFOLIO_DIR, COSTS_DIR)
-
-
-def ticker_from_path(path):
-    return os.path.basename(path).split('_')[0].upper()
+from config import (HOME_CURRENCY, BUSINESS_DAYS, WARMUP, US_WITHHOLDING, PORTFOLIO_DIR, COSTS_DIR)
+from universe import ticker_from_path
 
 
 def load_prices(path):
@@ -130,6 +128,12 @@ def main():
               "<allocation_csv> <instrument_csv> [<instrument_csv> ...]")
         sys.exit(1)
 
+    stored, _ = capital.load()
+    if stored['currency'] != HOME_CURRENCY:
+        raise ValueError(f"the account is in {stored['currency']}, "
+                         f"the system reports in {HOME_CURRENCY}")
+    account_value = stored['value']
+
     weights = load_weights(sys.argv[1])
     prices = {ticker_from_path(p): load_prices(p) for p in sys.argv[2:]}
 
@@ -147,9 +151,9 @@ def main():
     costs, costs_file = load_costs()
     income = load_income(sorted(prices), common)
     fx = load_fx(common)
-    capital0 = CAPITAL / fx[0]
+    capital0 = account_value / fx[0]
 
-    print(f"capital {CAPITAL:,.0f} {HOME_CURRENCY} = {capital0:,.0f} USD "
+    print(f"capital {account_value:,.0f} {HOME_CURRENCY} = {capital0:,.0f} USD "
       f"at {fx[0]:.5f}")
     print("weights  " + "   ".join(f"{t} {weights[t]:.0%}"
                                    for t in sorted(prices)))
@@ -183,12 +187,21 @@ def main():
     }, index=index)
     portfolio.index.name = 'date'
 
+    # return on the equity carried into each day, so the series is comparable
+    # across a changing account size
+    prior = portfolio['equity'].shift(1).fillna(account_value)
+    returns = portfolio['net_pnl'] / prior
+    vol = returns.std() * np.sqrt(BUSINESS_DAYS)
+    sharpe = returns.mean() / returns.std() * np.sqrt(BUSINESS_DAYS)
+
     years = len(portfolio) / BUSINESS_DAYS
     final = portfolio['equity'].iloc[-1]
-    print(f"equity   start {CAPITAL:,.0f}   end {final:,.0f}   "
+    print(f"equity   start {account_value:,.0f}   end {final:,.0f}   "
           f"min {portfolio['equity'].min():,.0f}   "
           f"max {portfolio['equity'].max():,.0f} {HOME_CURRENCY}")
-    print(f"cagr     {(final / CAPITAL) ** (1 / years) - 1:.2%}")
+    print(f"cagr     {(final / account_value) ** (1 / years) - 1:.2%}")
+    print(f"vol      {vol:.2%}")
+    print(f"sharpe   {sharpe:.2f}")
     print(f"rebalances   {int(rebalanced.sum())}")
     print(f"costs paid   {portfolio['cost'].sum():,.0f} {HOME_CURRENCY}")
     print(f"dividends    {portfolio['dividend'].sum():,.0f} {HOME_CURRENCY}")

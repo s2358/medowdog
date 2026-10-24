@@ -6,6 +6,8 @@ Evaluation statistics for the equity curve.
 
 Daily returns are net_pnl_t / equity_{t-1}. Sharpe is on raw returns, not excess. Skew carries SE = sqrt(6/n).
 
+Starting capital is recovered from the equity curve itself - the first row is that capital plus the first day's result - so it is always the figure the position sizing used.
+
 The drag figures split sharpe_gross - sharpe_net into trading costs,
 financing and currency, applied in that order.
 
@@ -19,7 +21,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
-from config import (CAPITAL, VOL_TARGET, HOME_CURRENCY, BUSINESS_DAYS, PORTFOLIO_DIR)
+from config import (VOL_TARGET, HOME_CURRENCY, BUSINESS_DAYS, PORTFOLIO_DIR)
 
 ANNUALISE = np.sqrt(BUSINESS_DAYS)
 REQUIRED = ('gross_pnl', 'cost', 'net_pnl', 'equity')
@@ -31,6 +33,14 @@ def load_portfolio(path):
     if missing:
         raise ValueError(f"{path} is missing columns: {missing}")
     return df.sort_index()
+
+def starting_capital(df):
+    """
+    The capital the first position was sized against.
+
+    equity holds end-of-day values, so the first row is that capital plus the first day's net result. Taking it from the curve means it can never disagree with the run that produced the curve.
+    """
+    return float(df['equity'].iloc[0] - df['net_pnl'].iloc[0])
 
 def returns_on_capital(pnl, equity, capital0):
     """
@@ -212,7 +222,7 @@ def axis_svg(xs, index, ticks, label_of, y_of, height):
     return ''.join(parts)
 
 
-def equity_svg(equity, height=270):
+def equity_svg(equity, capital0, height=270):
     xs = x_positions(len(equity))
     lo, hi = float(equity.min()), float(equity.max())
     top, bottom = hi * 1.08, lo * 0.92
@@ -223,7 +233,7 @@ def equity_svg(equity, height=270):
         return PAD_T + (1 - frac) * span_px
 
     ys = [y_of(v) for v in equity.values]
-    base = y_of(CAPITAL)
+    base = y_of(capital0)
     body = [
         axis_svg(xs, equity.index, log_ticks(bottom, top),
                  lambda v: (f"{v / 1000:g}k" if v >= 1000 else f"{v:g}"),
@@ -465,9 +475,9 @@ hook('dd', v => (v * 100).toFixed(1) + '%');
 """
 
 
-def write_report(path, df, net, monthly, grid, dd, stats, src):
+def write_report(path, df, grid, dd, stats, src):
     equity = df['equity']
-    eq_svg, xs, eq_ys = equity_svg(equity)
+    eq_svg, xs, eq_ys = equity_svg(equity, stats['equity_start'])
     dd_svg, _, dd_ys = drawdown_svg(dd['curve'])
 
     points = {
@@ -488,7 +498,7 @@ def write_report(path, df, net, monthly, grid, dd, stats, src):
 
     tiles = ''.join([
         tile('terminal equity', f"{equity.iloc[-1]:,.0f}",
-             f"from {CAPITAL:,.0f} {HOME_CURRENCY}"),
+             f"from {stats['equity_start']:,.0f} {HOME_CURRENCY}"),
         tile('cagr', f"{stats['cagr']:.1%}",
              f"{stats['annual_vol']:.1%} realised vol"),
         tile('sharpe (net)', f"{stats['sharpe_net']:.2f}",
@@ -541,7 +551,7 @@ def write_report(path, df, net, monthly, grid, dd, stats, src):
 <body><div class="wrap">
 <h1>Medowdog evaluation</h1>
 <p class="sub">{equity.index[0].date()} to {equity.index[-1].date()} &middot;
-{stats['rows']:,.0f} rows &middot; capital {CAPITAL:,.0f} {HOME_CURRENCY},
+{stats['rows']:,.0f} rows &middot; capital {stats['equity_start']:,.0f} {HOME_CURRENCY},
 compounding &middot; vol target {VOL_TARGET:.0%}</p>
 
 <div class="tiles">{tiles}</div>
@@ -577,20 +587,21 @@ def main():
     path = sys.argv[1] if len(sys.argv) > 1 else PORTFOLIO_DIR / 'portfolio.csv'
     df = load_portfolio(path)
 
+    capital0 = starting_capital(df)
     equity = df['equity']
     years = len(df) / BUSINESS_DAYS
 
-    net = returns_on_capital(df['net_pnl'], equity, CAPITAL)
-    gross = returns_on_capital(df['gross_pnl'], equity, CAPITAL)
+    net = returns_on_capital(df['net_pnl'], equity, capital0)
+    gross = returns_on_capital(df['gross_pnl'], equity, capital0)
 
     sr_net = sharpe(net)
     sr_gross = sharpe(gross)
-    cagr = (equity.iloc[-1] / CAPITAL) ** (1 / years) - 1
+    cagr = (equity.iloc[-1] / capital0) ** (1 / years) - 1
 
-    dd = drawdown_stats(equity, CAPITAL)
+    dd = drawdown_stats(equity, capital0)
 
-    weekly = period_returns(equity, CAPITAL, 'W')
-    monthly = period_returns(equity, CAPITAL, 'M')
+    weekly = period_returns(equity, capital0, 'W')
+    monthly = period_returns(equity, capital0, 'M')
     skews = [skew_with_se(net, 'daily'),
             skew_with_se(weekly, 'weekly'),
             skew_with_se(monthly, 'monthly')]
@@ -607,8 +618,8 @@ def main():
 
     # gross -> after trading costs -> after financing -> after fx, so each drag is the 
     # Sharpe given up at that step and the three add to sharpe_gross - sharpe_net
-    after_costs = returns_on_capital(df['gross_pnl'] - df['cost'], equity, CAPITAL)
-    after_financing = returns_on_capital(df['gross_pnl'] - df['cost'] - financing_col, equity, CAPITAL)
+    after_costs = returns_on_capital(df['gross_pnl'] - df['cost'], equity, capital0)
+    after_financing = returns_on_capital(df['gross_pnl'] - df['cost'] - financing_col, equity, capital0)
     
     sr_after_costs = sharpe(after_costs)
     sr_after_financing = sharpe(after_financing)
@@ -621,7 +632,7 @@ def main():
           f"({len(df)} rows, {years:.2f} years)\n")
 
     print("return")
-    print(f"  equity          {CAPITAL:,.0f} -> {equity.iloc[-1]:,.0f} "
+    print(f"  equity          {capital0:,.0f} -> {equity.iloc[-1]:,.0f} "
           f"{HOME_CURRENCY}")
     print(f"  cagr            {cagr:>8.2%}")
     print(f"  mean annual     {net.mean() * BUSINESS_DAYS:>8.2%}   "
@@ -687,7 +698,7 @@ def main():
     stats = {
         'rows': len(df),
         'years': years,
-        'equity_start': CAPITAL,
+        'equity_start': capital0,
         'equity_end': equity.iloc[-1],
         'equity_min': equity.min(),
         'equity_max': equity.max(),
@@ -738,7 +749,7 @@ def main():
     dd['curve'].rename('drawdown').to_csv(
         PORTFOLIO_DIR / f'drawdown_{stem}_{stamp}.csv')
     report_path = PORTFOLIO_DIR / f'report_{stem}_{stamp}.html'
-    write_report(report_path, df, net, monthly, grid, dd, stats,
+    write_report(report_path, df, grid, dd, stats,
                  f"generated from {path}")
 
     note = f"  ({archived} archived)" if archived else ""

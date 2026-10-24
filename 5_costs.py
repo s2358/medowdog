@@ -1,11 +1,13 @@
 """
 Measure trading costs from live bid/ask spreads.
 
-python 5_costs.py data/SPY/*.csv data/GLDM/*.csv data/SLV/*.csv
+    python 5_costs.py data/features/SPY.csv data/features/GLDM.csv data/features/SLV.csv
 
 Must run during US market hours - the quote stream returns IBKR's -1 sentinel when the market is closed, which the pre-flight probe catches. 
 
-Trade sizes come from the turnover file the position sizing script writes. The $1 commission minimum is divided by them, so they dominate the result: at 5 shares the minimum is $0.20/share, at 23 it is $0.04 
+Trade sizes come from the turnover file the position sizing script writes. The
+$1 commission minimum is divided by them, so they dominate the result: at 5
+shares the minimum is $0.20 a share, at 200 it is $0.005.
 """
 
 import pandas as pd
@@ -13,10 +15,12 @@ import numpy as np
 import os
 import sys
 from datetime import datetime
+from ib_async import IB
 
-from ib_insync import IB, Stock
+from config import (IB_HOST, IB_PORT, IB_MARKET_DATA_TYPE, WARMUP, BUSINESS_DAYS, SPEED_LIMIT_SR, COSTS_DIR, PORTFOLIO_DIR)
+import universe
+from universe import WEIGHTS, ticker_from_path
 
-from config import (IB_HOST, IB_PORT, IB_MARKET_DATA_TYPE, WARMUP, BUSINESS_DAYS, COMMISSION_PER_SHARE, COMMISSION_MINIMUM, COMMISSION_MAX_PCT, SPEED_LIMIT_SR, COSTS_DIR, PORTFOLIO_DIR, WEIGHTS)
 
 CLIENT_ID = 21
 
@@ -29,14 +33,13 @@ PROBE_TIMEOUT = 15          # seconds to wait for the first quote
 SPINNER = '|/-\\'
 ANIMATE = sys.stdout.isatty()   # no spinner when redirected to a log
 
-def ticker_from_path(path):
-    return os.path.basename(path).split('_')[0].upper()
 
 def latest_icv(path):
-    """ICV = ewma_vol x close: the volatility of one share, in USD."""
-    df = pd.read_csv(path, usecols=['date', 'close', 'ewma_vol']).iloc[WARMUP:]
+    """ICV: the currency volatility of one unit, as script 3 computed it."""
+    df = pd.read_csv(path, usecols=['date', 'close', 'icv']).iloc[WARMUP:]
     row = df.iloc[-1]
-    return row['ewma_vol'] * row['close'], row['date'], row['close']
+    return row['icv'], row['date'], row['close']
+
 
 def wait_for_quote(ib, ticker, timeout=PROBE_TIMEOUT):
     """Poll until a usable quote arrives, or the timeout expires."""
@@ -50,7 +53,7 @@ def wait_for_quote(ib, ticker, timeout=PROBE_TIMEOUT):
 
 def sample_quotes(ib, symbol, samples=SAMPLES, interval=SAMPLE_INTERVAL):
     """Sample bid/ask repeatedly; return the list of spreads seen"""
-    contract = Stock(symbol, 'SMART', 'USD')
+    contract = universe.contract(symbol)
     ib.qualifyContracts(contract)
     ticker = ib.reqMktData(contract, '', False, False)
 
@@ -87,10 +90,6 @@ def sample_quotes(ib, symbol, samples=SAMPLES, interval=SAMPLE_INTERVAL):
     ib.cancelMktData(contract)
     return spreads
 
-def commission_per_share(shares, price):
-    total = max(COMMISSION_MINIMUM, shares * COMMISSION_PER_SHARE)
-    total = min(total, COMMISSION_MAX_PCT * shares * price)
-    return total / shares
 
 def standardised_cost(half_spread, comm_per_share, icv):
     """ (2 x C / (annualised ICV), in annual Sharpe ratio units per round trip)"""
@@ -127,7 +126,7 @@ def main():
 
     # pre-flight: if the market is closed, fail in seconds rather than 
     # grinding through samples x interval x tickers of dead air
-    probe = Stock(tickers[0], 'SMART', 'USD')
+    probe = universe.contract(tickers[0])
     ib.qualifyContracts(probe)
     probe_ticker = ib.reqMktData(probe, '', False, False)
     live = wait_for_quote(ib, probe_ticker)
@@ -147,19 +146,31 @@ def main():
           + ", ".join(f"{t} {typical_trade[t]}" for t in tickers))
 
     rows = []
+    failed = []
     try:
         for path, ticker in zip(paths, tickers):
-            icv, asof, close = latest_icv(path)
-            spreads = sample_quotes(ib, ticker)
+            try:
+                icv, asof, close = latest_icv(path)
+                spreads = sample_quotes(ib, ticker)
+            except ConnectionError as exc:
+                # the socket is gone, so nothing after this can succeed
+                print(f"{ticker:6s} connection lost: {exc}")
+                failed.extend(tickers[tickers.index(ticker):])
+                break
+            except Exception as exc:
+                print(f"{ticker:6s} FAILED: {exc}")
+                failed.append(ticker)
+                continue            
 
             if not spreads:
                 print(f"{ticker}: no valid quotes - market closed, or no data subscription")
+                failed.append(ticker)
                 continue
 
             spread = float(np.median(spreads))
-            half = spread / 2
+            half = spread / 2 * universe.multiplier(ticker)
             shares = typical_trade[ticker]
-            comm = commission_per_share(shares, close)
+            comm = universe.commission(ticker, shares, close) / shares
             sc, C = standardised_cost(half, comm, icv)
 
             rows.append({
@@ -188,6 +199,9 @@ def main():
     if not rows:
         print("nothing collected")
         sys.exit(1)
+
+    if failed:
+        print(f"\nnot measured: {', '.join(failed)}")
 
     out = pd.DataFrame(rows)
     COSTS_DIR.mkdir(parents=True, exist_ok=True)

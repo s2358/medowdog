@@ -8,17 +8,22 @@ from pathlib import Path
 # --- paths ---
 PROJECT_ROOT = Path(__file__).parent
 DATA_DIR = PROJECT_ROOT / 'data'
+FEATURES_DIR = DATA_DIR / 'features'
 CORRELATIONS_DIR = DATA_DIR / 'correlations'
 PORTFOLIO_DIR = DATA_DIR / 'portfolio'
 COSTS_DIR = DATA_DIR / 'costs'
 FX_CACHE = DATA_DIR / 'fx_rate.json'
 DIVIDENDS_DIR = DATA_DIR / 'dividends'
 FITTED_DIR = DATA_DIR / 'fitted'
+ORDERS_DIR = DATA_DIR / 'orders'
+FILLS_DIR = DATA_DIR / 'fills'
 
 # --- account ---
-CAPITAL = 10000.0       # home currency (SGD)
 VOL_TARGET = 0.20
 HOME_CURRENCY = 'SGD'
+
+# --- capital ---
+CAPITAL_MAX_AGE_HOURS = 12   # the account value must be re-read at least this often
 
 # --- fx ---
 FX_PAIR = 'USDSGD'      # home currency per unit of instrument currency
@@ -39,17 +44,15 @@ DIVIDEND_MAX_AGE_DAYS = 90
 
 # --- interactive brokers ---
 IB_HOST = '127.0.0.1'
-IB_PORT = 4001          # 4001 gateway live, 4002 gateway paper
+IB_PORT = 4002          # 4001 gateway live, 4002 gateway paper
 IB_MARKET_DATA_TYPE = 3 # 1 live, 3 delayed
+LIMIT_BUFFER = 0.003    # cross the quoted touch - quotes are delayed
 
 # --- framework parameters ---
 VOL_WINDOW = 30     # rolling window for the sanity-check vol
-VOL_LAMBDA = 0.9459   # EWMA decay; span = 2/(1-lambda) - 1 ~32 days
+VOL_LAMBDA = 0.9459   # EWMA decay; span = 2/(1-lambda) - 1 ~36 days
 BUSINESS_DAYS = 256
 WARMUP = 256            # slowest EWMA span
-
-# instrument weights, handcrafted from Carver's Table 8
-WEIGHTS = {'SPY': 0.40, 'GLDM': 0.30, 'SLV': 0.30}
 
 FORECAST_CAP = 20
 FORECAST_SCALARS = {'16_64': 3.75, '32_128': 2.65, '64_256': 1.87}
@@ -61,10 +64,7 @@ FDM_CAP = 2.5           # forecast diversification multiplier ceiling
 INERTIA = 0.10         # don't trade if the gap is under 10%
 SPEED_LIMIT_SR = 0.13   # max annual cost in Sharpe ratio units
 
-# --- commission (IBKR fixed, US equities) ---
-COMMISSION_PER_SHARE = 0.005
-COMMISSION_MINIMUM = 1.00
-COMMISSION_MAX_PCT = 0.01   # capped at 1% of trade value
+COST_MULTIPLIER = 1.0       # scale measured costs, for sensitivity runs
 
 # --- tax? ---
 US_WITHHOLDING = 0.30

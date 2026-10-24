@@ -104,6 +104,9 @@ def fetch_series(pair=FX_PAIR):
         # IDEALPRO runs Sunday 17:00 to Friday 17:00 ET, and useRTH=True cuts
         # that down to a session the pair does not keep.
         frame, complete = bars.daily(ib, contract, 'MIDPOINT', use_rth=False, label=pair)
+        frame, dropped = bars.drop_unsettled(frame)
+        if dropped is not None:
+            print(f"{pair}  dropped the unsettled {dropped} bar")
     finally:
         ib.disconnect()
 

@@ -1,15 +1,19 @@
 """
 EWMAC forecasts, combined forecast, subsystem returns and ICV.
 
-python 3_ewmac_calculator.py <csv> [<csv> ...]
+    python 3_ewmac_calculator.py <features_csv> [<features_csv> ...]
 
-Each file is rewritten in place with the new columns. Run after the volatility script, which supplies 'returns' and 'ewma_vol'.
+Each features file is rewritten with the new columns added. Run after the
+volatility script, which creates those files and supplies 'returns' and
+'ewma_vol'.
 """
 
 import pandas as pd
 import numpy as np
 import os
 import sys
+import universe
+from universe import ticker_from_path
 from config import (FORECAST_SCALARS, FORECAST_WEIGHTS, FDM, FORECAST_CAP, BUSINESS_DAYS, VOL_TARGET)
 
 REPORT_COLS = ['date', 'close', 'combined_forecast', 'subsystem_returns', 'icv']
@@ -32,29 +36,35 @@ def subsystem_returns(df, vol_target=VOL_TARGET, business_days=BUSINESS_DAYS):
     )
 
 
-def calculate_forecasts(df):
+def calculate_forecasts(df, ticker):
     close_prices = df['close'].values
-    vol_in_price_points = df['ewma_vol'].values * close_prices
+
+    # the currency value of a one-day move in one unit. Dividing each
+    # crossover by it turns a price difference into a risk-adjusted number,
+    # which is what makes a fast rule and a slow rule comparable, and it is
+    # also what position sizing needs to know how risky a unit is.
+    df['icv'] = df['ewma_vol'] * df['close'] * universe.multiplier(ticker)
+    icv = df['icv'].values
 
     for name in FORECAST_SCALARS:
         fast, slow = (int(n) for n in name.split('_'))
         crossover = (calculate_ewma(close_prices, fast)
                      - calculate_ewma(close_prices, slow))
         df[f'EWMAC_{name}'] = crossover
-        df[f'EWMAC_{name}_vol_std'] = crossover / vol_in_price_points
-        df[f'EWMAC_{name}_scaled'] = (df[f'EWMAC_{name}_vol_std'] * FORECAST_SCALARS[name]).clip(-FORECAST_CAP, FORECAST_CAP)
+        df[f'EWMAC_{name}_vol_std'] = crossover / icv
+        df[f'EWMAC_{name}_scaled'] = (df[f'EWMAC_{name}_vol_std']
+                                      * FORECAST_SCALARS[name]).clip(
+                                              -FORECAST_CAP, FORECAST_CAP)
+
     raw = sum(FORECAST_WEIGHTS[name] * df[f'EWMAC_{name}_scaled']
               for name in FORECAST_WEIGHTS)
     df['combined_forecast'] = (raw * FDM).clip(-FORECAST_CAP, FORECAST_CAP)
-
-    # instrument currency volatility of one block (one share)
-    # = daily price vol x block value x 100, and block value = close/100
-    df['icv'] = df['ewma_vol'] * df['close']
     return df
+
 
 def process(path):
     df = pd.read_csv(path)
-    df = calculate_forecasts(df)
+    df = calculate_forecasts(df, ticker_from_path(path))
     df['subsystem_returns'] = subsystem_returns(df)
     df.to_csv(path, index=False)
     return df

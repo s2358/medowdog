@@ -2,7 +2,9 @@
 Portfolio position sizing with compounding capital.
 
     python 6_position_sizing.py data/correlations/allocation_GLDM_SLV_SPY.csv \
-        data/SPY/*.csv data/GLDM/*.csv data/SLV/*.csv
+        data/features/SPY.csv data/features/GLDM.csv data/features/SLV.csv
+
+Capital comes from data/capital.json, the account value recorded by capital.py. Risk is a fraction of what the account holds, so the figure is read before every run rather than fixed in the configuration.
 
 Capital is not constant. Each day's positions are sized against the equity
 produced by every prior day's P&L, which makes the whole calculation
@@ -21,6 +23,10 @@ Margin financing is charged on the balance borrowed overnight - gross notional l
 Gross leverage is capped at MAX_LEVERAGE. The broker's limit applies to the whole portfolio, so it can only be checked once every instrument has been sized - a second pass scales every position by the same factor and re-rounds. Whole block means the result lands near the cap rather than exactly on it.
 
 The loop runs in USD, because the account is funded by converting SGD up front. Each day's P&L, costs, financing and dividends are USD, and so is the equity the vol target is sized against. The home-currency curve is that equity at each day's rate, which exposes the whole balance to USDSGD, not just the day's flows - reported as its own fx_pnl line so the identity equity.diff() == net_pnl still holds exactly.
+
+Writes positions_<TICKER>.csv and portfolio.csv for the history, and turnover
+statistics per instrument. Today's targets are targets.py, which does not
+depend on any of this.
 """
 
 import os
@@ -29,35 +35,22 @@ import sys
 import numpy as np
 import pandas as pd
 
+import capital
+import sizing
 import dividends
 import fx_data
-from config import (CAPITAL, VOL_TARGET, HOME_CURRENCY, BUSINESS_DAYS,
-                    WARMUP, INERTIA, US_WITHHOLDING, FINANCING_SPREAD, MAX_LEVERAGE, 
-                    WINDOW_START, WINDOW_END, BENCHMARK_FILE, PORTFOLIO_DIR, COSTS_DIR)
+from targets import load_instrument, load_allocation
+import universe
+from universe import ticker_from_path
+from config import (VOL_TARGET, HOME_CURRENCY, BUSINESS_DAYS,
+                    INERTIA, US_WITHHOLDING, FINANCING_SPREAD, MAX_LEVERAGE,
+                    WINDOW_START, WINDOW_END, BENCHMARK_FILE, PORTFOLIO_DIR,
+                    COSTS_DIR, COST_MULTIPLIER)
+
 
 PER_TICKER_COLS = ('ivv', 'vol_scalar', 'subsystem_position',
                    'portfolio_position', 'rounded', 'held', 'trade',
                    'notional', 'pnl', 'cost', 'dividend')
-
-
-def ticker_from_path(path):
-    return os.path.basename(path).split('_')[0].upper()
-
-
-def load_instrument(path):
-    cols = ['date', 'close', 'combined_forecast', 'icv']
-    df = pd.read_csv(path, usecols=cols).iloc[WARMUP:]
-    df['date'] = pd.to_datetime(df['date'])
-    return df.set_index('date')
-
-
-def load_allocation(path):
-    alloc = pd.read_csv(path).set_index('ticker')
-    idm = alloc['idm'].iloc[0]
-    if not np.allclose(alloc['idm'], idm):
-        raise ValueError("idm differs between rows of the allocation file")
-    return alloc['instrument_weight'].to_dict(), float(idm)
-
 
 def load_costs():
     """Latest measured cost per share, per ticker. None if never measured."""
@@ -66,7 +59,7 @@ def load_costs():
         return None, None
     latest = files[-1]
     series = pd.read_csv(latest).set_index('ticker')['cost_per_share_C']
-    return series.to_dict(), latest.name
+    return (series * COST_MULTIPLIER).to_dict(), latest.name
 
 def load_income(tickers, index):
     """
@@ -122,13 +115,6 @@ def load_fx(index):
     return aligned.values
 
 
-def round_half_away(x):
-    """
-    Round half away from zero. np.round uses banker's rounding, which sends
-    0.5 to 0 and 1.5 to 2 - not what the framework means by rounding.
-    """
-    return np.sign(x) * np.floor(np.abs(x) + 0.5)
-
 
 def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None, income=None, rates=None):
     """
@@ -148,6 +134,10 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
     close = {t: frames[t]['close'].values for t in tickers}
     fcast = {t: frames[t]['combined_forecast'].values for t in tickers}
     icv = {t: frames[t]['icv'].values for t in tickers}
+
+    # what one unit is worth, which is the price for a share and the price
+    # times the contract size for a future
+    value = {t: close[t] * universe.multiplier(t) for t in tickers}
 
     income = income or {t: np.zeros(n) for t in tickers}
 
@@ -177,7 +167,7 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
         # 1. yesterday's position meets today's price, and is paid whatever went ex today
         total = 0.0
         for t in tickers:
-            p = (held_prev[t] * (close[t][i] - close[t][i - 1])
+            p = (held_prev[t] * (value[t][i] - value[t][i - 1])            
                  if i > 0 else 0.0)
             d = held_prev[t] * income[t][i]
             cols[t]['pnl'][i] = p
@@ -191,22 +181,17 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
             break
 
         # 2. size today's positions against the equity we now hold
-        daily_cash_vol_target = cap * vol_target / np.sqrt(BUSINESS_DAYS)
+        daily_target = sizing.daily_cash_vol_target(cap, vol_target)
         want = {}
 
         for t in tickers:
             ivv = icv[t][i]
-            vol_scalar = daily_cash_vol_target / ivv if ivv > 0 else np.nan
+            vol_scalar = sizing.volatility_scalar(daily_target, ivv)
             subsystem = fcast[t][i] / 10 * vol_scalar
-            target = subsystem * weights[t] * idm
-            rounded = round_half_away(target) if np.isfinite(target) else np.nan
-
-            current = held_prev[t]
-            if np.isfinite(rounded):
-                denom = max(abs(current), 1.0)
-                new = rounded if abs(rounded - current) / denom > INERTIA else current
-            else:
-                new = current
+            target = sizing.target_position(fcast[t][i], ivv, daily_target,
+                                            weights[t], idm)
+            rounded = (sizing.round_half_away(target)
+                       if np.isfinite(target) else np.nan)
 
             c = cols[t]
             c['ivv'][i] = ivv
@@ -214,21 +199,16 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
             c['subsystem_position'][i] = subsystem
             c['portfolio_position'][i] = target
             c['rounded'][i] = rounded
-            want[t] = new
+            want[t] = sizing.apply_inertia(rounded, held_prev[t], INERTIA)
 
-        # 2b. The broker will not carry more than max_leverage x equity overnight,
-        # and the limit is on the portfolio, so it can only be applied now that 
-        # every instrument has been sized.
-        wanted = sum(abs(want[t] * close[t][i]) for t in tickers)
-        scale = 1.0
-        if wanted > max_leverage * cap:
-            scale = max_leverage * cap / wanted
-            for t in tickers:
-                want[t] = round_half_away(want[t] * scale)
+        # 2b. the cap is on the portfolio, so it can only be applied once
+        # every instrument has been sized
+        want, scale = sizing.cap_leverage(
+                want, {t: value[t][i] for t in tickers}, cap, max_leverage)
 
         day_capped[i] = scale < 1.0
         day_scale[i] = scale
-
+        
         # 2c. Pay for the trades the capped positions imply, not the ones the 
         # forecast asked for.
         spent = 0.0
@@ -241,14 +221,14 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
             c = cols[t]
             c['held'][i] = new
             c['trade'][i] = trade
-            c['notional'][i] = new * close[t][i]
+            c['notional'][i] = new * value[t][i]
             c['cost'][i] = cost
 
             spent += cost
             held_prev[t] = new
       
         # 3. pay for the trades, and for the money borrowed overnight
-        held_value = sum(abs(held_prev[t] * close[t][i]) for t in tickers)
+        held_value = sum(abs(held_prev[t] * value[t][i]) for t in tickers)
         charge = debt_prev * rate[i] / 360 * days[i]
 
         day_costs[i] = spent
@@ -329,13 +309,18 @@ def turnover_stats(df, years):
     }
 
 
+
 def main():
     if len(sys.argv) < 3:
         print(f"Usage: python {os.path.basename(sys.argv[0])} <allocation_csv> "
               "<instrument_csv> [<instrument_csv> ...]")
         sys.exit(1)
 
-    spot = fx_data.load()
+    stored, age = capital.load()
+    if stored['currency'] != HOME_CURRENCY:
+        raise ValueError(f"the account is in {stored['currency']}, "
+                         f"the system reports in {HOME_CURRENCY}")
+    account_value = stored['value']
     cached = fx_data.describe()
     costs, costs_file = load_costs()
 
@@ -366,18 +351,21 @@ def main():
     rates = load_financing(common)
     
     fx = load_fx(common)
-    capital0 = CAPITAL / fx[0]
+    capital0 = account_value / fx[0]
 
     counts = ', '.join(f"{t} {int((income[t] > 0).sum())}"
                        for t in sorted(income))
    
-    print(f"capital {CAPITAL:,.0f} {HOME_CURRENCY} = {capital0:,.0f} USD "
+    print(f"capital {account_value:,.0f} {HOME_CURRENCY} = {capital0:,.0f} USD "
           f"at {fx[0]:.5f} (compounding)   "
+          f"read {age.total_seconds()/3600:.1f}h ago   "
           f"vol target {VOL_TARGET:.0%}   IDM {idm:.4f}")
-    print(f"fx {cached['pair']} spot {spot:.5f} (fetched "
-          f"{cached['fetched_at']})   history {fx[0]:.5f} -> {fx[-1]:.5f}")
-
-    print(f"costs: {costs_file if costs_file else 'not measured - gross only'}")
+    
+    print(f"fx {cached['pair']} history {fx[0]:.5f} -> {fx[-1]:.5f}")
+    
+    multiple = f" x{COST_MULTIPLIER:g}" if COST_MULTIPLIER != 1.0 else ""
+    print(f"costs: {costs_file if costs_file else 'not measured - gross only'}"
+          f"{multiple}")
     print(f"financing: benchmark + {FINANCING_SPREAD:.2%}, "
           f"{rates.min():.2%} to {rates.max():.2%} over the window")
     print(f"dividends: {counts}"
@@ -401,7 +389,7 @@ def main():
 
     equity = portfolio['equity']
     lev = portfolio['gross_leverage']
-    print(f"\nequity   start {CAPITAL:,.0f}   end {equity.iloc[-1]:,.0f}   "
+    print(f"\nequity   start {account_value:,.0f}   end {equity.iloc[-1]:,.0f}   "
           f"min {equity.min():,.0f}   max {equity.max():,.0f} {HOME_CURRENCY}")
     print(f"gross leverage   mean {lev.mean():.2f}x   "
           f"median {lev.median():.2f}x   max {lev.max():.2f}x   "
@@ -424,7 +412,7 @@ def main():
         print(f"dividends   {paid:,.0f} {HOME_CURRENCY}  "
               f"({paid/years:,.0f}/yr, net of {US_WITHHOLDING:.0%} "
               f"withholding)")
-    
+   
     PORTFOLIO_DIR.mkdir(parents=True, exist_ok=True)
     stem = '_'.join(sorted(built))
     summary.to_csv(PORTFOLIO_DIR / f'turnover_{stem}.csv')

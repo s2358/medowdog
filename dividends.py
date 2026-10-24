@@ -18,7 +18,13 @@ This is the only script that touches ADJUSTED_LAST, and it keeps nothing but
 the extracted dividends, so the price history stays unadjusted and a rerun
 never restates it.
 
-A short answer here is indistinguishable from a correct one, so nothing is written unless the bars reach back to the start of the backtest window - the latest price history start among the instruments in WEIGHTS. bars.py walks the history and reports whether it reached the start.
+A short answer here is indistinguishable from a correct one, so nothing is
+written unless the bars reach back to the start of the backtest window - the
+latest price history start among the instruments in WEIGHTS. bars.py walks the
+history and reports whether it reached the start.
+
+A stored answer inside DIVIDEND_MAX_AGE_DAYS is reused and no connection is
+opened. Naming a ticker on the command line forces it to be fetched again.
 
 Writes data/dividends/<TICKER>.csv and _fetched.json.
 """
@@ -28,9 +34,9 @@ import sys
 from datetime import datetime, timedelta
 import pandas as pd
 import bars
-from config import (WEIGHTS, DATA_DIR, DIVIDENDS_DIR, DIVIDEND_MAX_AGE_DAYS,
+from config import (DATA_DIR, DIVIDENDS_DIR, DIVIDEND_MAX_AGE_DAYS,
                     IB_HOST, IB_PORT)
-
+from universe import WEIGHTS
 
 # a ratio step below this is rounding noise in IBKR's adjusted prices, not a
 # distribution. SPY pays around 30 bp a quarter, so the gap is wide.
@@ -135,7 +141,6 @@ def implied_dividends(trades, adjusted, min_yield=MIN_YIELD):
     return out
 
 
-
 def close_series(ib, contract, what):
     """Daily closes, date-indexed, as (Series, complete)."""
     frame, complete = bars.daily(ib, contract, what)
@@ -189,18 +194,39 @@ def verdict(result, needed):
 
 
 def main():
-    tickers = [t.upper() for t in sys.argv[1:]] or sorted(WEIGHTS)
-    print(f"deriving dividends for {', '.join(tickers)} "
+    explicit = [t.upper() for t in sys.argv[1:]]
+    tickers = explicit or sorted(WEIGHTS)
+
+    status = {t: describe(t) for t in tickers}
+    if explicit:
+        wanted = tickers          # naming a ticker means refetch it
+    else:
+        wanted = [t for t in tickers
+                  if status[t] is None or status[t]['stale']]
+
+    for ticker in tickers:
+        if ticker in wanted:
+            continue
+        info = status[ticker]
+        print(f"{ticker:6s} cached {info['age_days']:3d}d   "
+              f"{info['n']:3d} distributions   "
+              f"last {info['last_ex_date']}")
+
+    if not wanted:
+        print(f"\nall within {DIVIDEND_MAX_AGE_DAYS} days, nothing to fetch")
+        return
+
+    print(f"deriving dividends for {', '.join(wanted)} "
           f"({bars.CHUNK}, TRADES vs ADJUSTED_LAST)\n")
 
     starts = [price_start(t) for t in sorted(WEIGHTS)]
     starts = [d for d in starts if d is not None]
     needed = max(starts) if starts else None
 
-    results = fetch(tickers)
+    results = fetch(wanted)
     kept = 0
 
-    for ticker in tickers:
+    for ticker in wanted:
         result = results[ticker]
         series = result['dividends']
         problem = verdict(result, needed)
@@ -221,8 +247,8 @@ def main():
               f"last {series.iloc[-1]:.4f}   "
               f"trailing 12m {recent.sum():.4f} USD/share")
 
-    print(f"\n{kept} of {len(tickers)} written to {DIVIDENDS_DIR}/")
-    if kept < len(tickers):
+    print(f"\n{kept} of {len(wanted)} written to {DIVIDENDS_DIR}/")
+    if kept < len(wanted):
         sys.exit(1)
 
 

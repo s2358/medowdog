@@ -3,7 +3,11 @@ Run the daily pipeline.
 
     python run.py
 
-Steps in order: fx rate, download prices, volatility, ewmac, correlation, dividends, position sizing, evaluate. The cost script is deliberately not here - it needs US market hours and runs from its own cron entry.
+Steps in order: fx rate, download prices, volatility, ewmac, correlation,
+dividends, capital, targets, position sizing, evaluate. The cost script is deliberately
+not here - it needs US market hours and runs from its own cron entry.
+
+This builds the targets. Acting on them is trade.py.
 
 Everything each step prints goes to the terminal and to logs/run_<timestamp>.log. The run stops at the first failure, so a broken step never leaves a later one working from stale inputs.
 """
@@ -13,7 +17,8 @@ import sys
 import time
 from datetime import datetime
 
-from config import PROJECT_ROOT, DATA_DIR, CORRELATIONS_DIR, WEIGHTS
+from config import PROJECT_ROOT, DATA_DIR, CORRELATIONS_DIR, FEATURES_DIR
+from universe import WEIGHTS
 
 TICKERS = sorted(WEIGHTS)
 LOG_DIR = PROJECT_ROOT / 'logs'
@@ -44,6 +49,16 @@ def one_csv(ticker):
 def instrument_csvs():
     return [one_csv(t) for t in TICKERS]
 
+
+def features_csvs():
+    paths = [FEATURES_DIR / f'{t}.csv' for t in TICKERS]
+    missing = [str(p) for p in paths if not p.exists()]
+    if missing:
+        raise FileNotFoundError(
+                f"not written by the volatility step: {', '.join(missing)}")
+    return [str(p) for p in paths]
+
+
 def allocation_csv():
     path = CORRELATIONS_DIR / f"allocation_{'_'.join(TICKERS)}.csv"
     if not path.exists():
@@ -56,11 +71,15 @@ STEPS = [
         ('fx data',        lambda: ['fx_data.py']),
         ('download',       lambda: ['1_ibkr_downloader.py'] + TICKERS),
         ('volatility',     lambda: ['2_volatility.py'] + instrument_csvs()),
-        ('ewmac',          lambda: ['3_ewmac_calculator.py'] + instrument_csvs()),
-        ('correlation',    lambda: ['4_correlation.py'] + instrument_csvs()),
-        ('dividends',      lambda: ['dividends.py']),         
+        ('ewmac',          lambda: ['3_ewmac_calculator.py'] + features_csvs()),
+        ('correlation',    lambda: ['4_correlation.py'] + features_csvs()),
+        ('dividends',      lambda: ['dividends.py']),
+#        ('reconcile',      lambda: ['reconcile.py']),
+        ('capital',        lambda: ['capital.py']),
+        ('targets',        lambda: ['targets.py', allocation_csv()]
+                                    + features_csvs()),
         ('position sizing',lambda: ['6_position_sizing.py', allocation_csv()]
-                                    + instrument_csvs()),
+                                    + features_csvs()),
         ('evaluate',        lambda: ['7_evaluate.py']),
         ]
 

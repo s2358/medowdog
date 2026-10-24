@@ -15,10 +15,7 @@ import sys
 from datetime import datetime
 import pandas as pd
 from config import FORECAST_SCALARS, WARMUP, FITTED_DIR, WINDOW_START, WINDOW_END
-
-def ticker_from_path(path):
-    """Trim the filename to retain only the ticker."""
-    return os.path.basename(path).split('_')[0].upper()
+from universe import ticker_from_path
 
 
 def in_window(frame):

@@ -20,7 +20,8 @@ from itertools import permutations
 import numpy as np
 import pandas as pd
 from config import (FORECAST_SCALARS, FORECAST_WEIGHTS, FDM, FDM_CAP, WARMUP, FITTED_DIR)
-from fit_scalars import ticker_from_path, archive_previous, in_window
+from universe import ticker_from_path
+from fit_scalars import archive_previous, in_window
 
 # the correlation values the handcrafting table is defined at
 GRID = (0.0, 0.5, 0.9)

@@ -9,8 +9,11 @@ requested once more before being accepted. `complete` is then decided from how f
 Callers build their own contracts.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
+from zoneinfo import ZoneInfo
 import pandas as pd
+
+EXCHANGE_TZ = ZoneInfo('America/New_York')
 
 # longest duration IB Gateway has accepted in testing
 CHUNK = '25 Y'
@@ -24,6 +27,25 @@ RETRY_PAUSE = 10.0
 
 # the head timestamp and the first bar actually served can differ by a few sessions. This separates that gap from a gateway truncating by years, so the exact value does not matter.
 HEAD_SLACK_DAYS = 30
+
+
+
+def drop_unsettled(frame, closes_at=time(17, 0), now=None):
+    """
+    Remove a final bar belonging to a session that has not closed yet.
+
+    A request made during the session returns the day so far shaped like a
+    daily bar. Everything downstream treats the last row as a settled close,
+    so a partial one has to go before it is written. Returns the frame and
+    the date dropped, or None if nothing was.
+    """
+    now = (now or datetime.now(EXCHANGE_TZ)).astimezone(EXCHANGE_TZ)
+    if now.time() >= closes_at:
+        return frame, None
+    last = _as_date(frame['date'].iloc[-1])
+    if last != now.date():
+        return frame, None
+    return frame.iloc[:-1].reset_index(drop=True), last
 
 
 def _as_date(value):
