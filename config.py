@@ -25,6 +25,8 @@ HOME_CURRENCY = 'SGD'
 # --- capital ---
 CAPITAL_MAX_AGE_HOURS = 12   # the account value must be re-read at least this often
 
+TARGET_STALE_DAYS = 3    # how far behind the newest an instrument's data may be
+
 # --- fx ---
 FX_PAIR = 'USDSGD'      # home currency per unit of instrument currency
 FX_SERIES = DATA_DIR / 'fx' / f'{FX_PAIR}.csv'

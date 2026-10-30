@@ -18,7 +18,7 @@ Dividends are read from data/dividends/ and credited to whatever position was
 held into each ex-date, net of US withholding - negative when the position was
 short. A ticker with no file there contributes nothing.
 
-Margin financing is charged on the balance borrowed overnight - gross notional less equity, which assumes the account was converted to USD up front. The rate is the Fed funds effective rate from data/rates/ plus FINANCING_SPREAD, accrued actual/360 on calendar days, so a Friday position carries three days of interest into Monday.
+Margin financing is charged on the balance borrowed overnight - the value of the cash instruments held less equity, which assumes the account was converted to USD up front. A futures position is excluded: it borrows nothing, because the cost of carry is already in the contract's price. The rate is the Fed funds effective rate from data/rates/ plus FINANCING_SPREAD, accrued actual/360 on calendar days, so a Friday position carries three days of interest into Monday.
 
 Gross leverage is capped at MAX_LEVERAGE. The broker's limit applies to the whole portfolio, so it can only be checked once every instrument has been sized - a second pass scales every position by the same factor and re-rounds. Whole block means the result lands near the cap rather than exactly on it.
 
@@ -39,7 +39,7 @@ import capital
 import sizing
 import dividends
 import fx_data
-from targets import load_instrument, load_allocation
+from targets import load_instrument, load_allocation, on_index, support_start
 import universe
 from universe import ticker_from_path
 from config import (VOL_TARGET, HOME_CURRENCY, BUSINESS_DAYS,
@@ -67,7 +67,7 @@ def load_income(tickers, index):
 
     Stored amounts are gross. Withholding comes off here: a Singapore account has no US treaty rate, so 30% of every distribution never arrives.
 
-    An ex-date that is not itself a row - the index holds only the days every instrument traded - is carried to the next row rather than dropped. The entitlement is still the position held before the real ex-date, which is what the loop uses.
+    An ex-date that is not itself a row - the index holds every day any instrument traded - is carried to the next row rather than dropped. The entitlement is still the position held before the real ex-date, which is what the loop uses.
     """
     out, missing = {}, []
     for ticker in tickers:
@@ -139,6 +139,10 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
     # times the contract size for a future
     value = {t: close[t] * universe.multiplier(t) for t in tickers}
 
+    # a future borrows nothing - the cost of carry is already in its price,
+    # so only cash instruments contribute to the overnight debit
+    financed = {t: universe.instrument(t)['type'] == 'STK' for t in tickers}
+
     income = income or {t: np.zeros(n) for t in tickers}
 
     rate = rates if rates is not None else np.zeros(n)
@@ -167,8 +171,8 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
         # 1. yesterday's position meets today's price, and is paid whatever went ex today
         total = 0.0
         for t in tickers:
-            p = (held_prev[t] * (value[t][i] - value[t][i - 1])            
-                 if i > 0 else 0.0)
+            p = (held_prev[t] * (value[t][i] - value[t][i - 1])
+                 if i > 0 and held_prev[t] != 0 else 0.0)
             d = held_prev[t] * income[t][i]
             cols[t]['pnl'][i] = p
             cols[t]['dividend'][i] = d
@@ -202,10 +206,13 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
             want[t] = sizing.apply_inertia(rounded, held_prev[t], INERTIA)
 
         # 2b. the cap is on the portfolio, so it can only be applied once
-        # every instrument has been sized
-        want, scale = sizing.cap_leverage(
-                want, {t: value[t][i] for t in tickers}, cap, max_leverage)
-
+        # every instrument has been sized. An instrument with no price yet is
+        # not in the book and cannot contribute to gross notional.
+        priced = [t for t in tickers if np.isfinite(value[t][i])]
+        capped, scale = sizing.cap_leverage(
+                {t: want[t] for t in priced},
+                {t: value[t][i] for t in priced}, cap, max_leverage)
+        want = {**want, **capped}
         day_capped[i] = scale < 1.0
         day_scale[i] = scale
         
@@ -221,21 +228,23 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
             c = cols[t]
             c['held'][i] = new
             c['trade'][i] = trade
-            c['notional'][i] = new * value[t][i]
+            c['notional'][i] = new * value[t][i] if new != 0 else 0.0
             c['cost'][i] = cost
 
             spent += cost
             held_prev[t] = new
       
         # 3. pay for the trades, and for the money borrowed overnight
-        held_value = sum(abs(held_prev[t] * value[t][i]) for t in tickers)
+        financed_value = sum(abs(held_prev[t] * value[t][i])
+                             for t in tickers
+                             if financed[t] and held_prev[t] != 0)
         charge = debt_prev * rate[i] / 360 * days[i]
 
         day_costs[i] = spent
         day_financing[i] = charge
         cap -= spent + charge
         equity[i] = cap
-        debt_prev = max(0.0, held_value - cap)
+        debt_prev = max(0.0, financed_value - cap)
 
     # if the account was wiped out, keep only the days that happened
     end = ruin_at if ruin_at is not None else n
@@ -309,7 +318,6 @@ def turnover_stats(df, years):
     }
 
 
-
 def main():
     if len(sys.argv) < 3:
         print(f"Usage: python {os.path.basename(sys.argv[0])} <allocation_csv> "
@@ -333,36 +341,44 @@ def main():
     if missing:
         raise KeyError(f"no weight in allocation file for: {sorted(missing)}")
 
-    # restrict every instrument to the common trading days
-    common = None
+    # every trading day any instrument had, so a short history truncates
+    # nothing - an instrument contributes from the day its own data begins
+    dates = None
     for df in frames.values():
-        common = df.index if common is None else common.intersection(df.index)
+        dates = df.index if dates is None else dates.union(df.index)
+
+    start = support_start()
+    if dates[0] < start:
+        dropped = int((dates < start).sum())
+        print(f"trimmed {dropped} rows before {start.date()}, where the fx "
+              "and benchmark rate series begin")
+        dates = dates[dates >= start]
 
     if WINDOW_START is not None:
-        common = common[common >= pd.Timestamp(WINDOW_START)]
+        dates = dates[dates >= pd.Timestamp(WINDOW_START)]
     if WINDOW_END is not None:
-        common = common[common < pd.Timestamp(WINDOW_END)]
-    if len(common) == 0:
+        dates = dates[dates < pd.Timestamp(WINDOW_END)]
+    if len(dates) == 0:
         raise ValueError("the configured window leaves no rows")
 
-    frames = {t: df.loc[common] for t, df in frames.items()}
+    frames = {t: on_index(df, dates) for t, df in frames.items()}
 
-    income, no_file = load_income(sorted(frames), common)
-    rates = load_financing(common)
-    
-    fx = load_fx(common)
+    income, no_file = load_income(sorted(frames), dates)
+    rates = load_financing(dates)
+
+    fx = load_fx(dates)
     capital0 = account_value / fx[0]
 
     counts = ', '.join(f"{t} {int((income[t] > 0).sum())}"
                        for t in sorted(income))
-   
+
     print(f"capital {account_value:,.0f} {HOME_CURRENCY} = {capital0:,.0f} USD "
           f"at {fx[0]:.5f} (compounding)   "
           f"read {age.total_seconds()/3600:.1f}h ago   "
           f"vol target {VOL_TARGET:.0%}   IDM {idm:.4f}")
-    
+
     print(f"fx {cached['pair']} history {fx[0]:.5f} -> {fx[-1]:.5f}")
-    
+
     multiple = f" x{COST_MULTIPLIER:g}" if COST_MULTIPLIER != 1.0 else ""
     print(f"costs: {costs_file if costs_file else 'not measured - gross only'}"
           f"{multiple}")
@@ -370,15 +386,15 @@ def main():
           f"{rates.min():.2%} to {rates.max():.2%} over the window")
     print(f"dividends: {counts}"
           + (f"  (never fetched: {', '.join(no_file)})" if no_file else ''))
-    print(f"window: {common[0].date()} -> {common[-1].date()}  "
-          f"({len(common)} rows)\n")
+    print(f"window: {dates[0].date()} -> {dates[-1].date()}  "
+          f"({len(dates)} rows)\n")
 
     built, portfolio, ruin_at = run(
         frames, weights, idm, fx, capital0, VOL_TARGET, MAX_LEVERAGE, costs, income, rates)
 
     if ruin_at is not None:
-        print(f"*** account wiped out on {common[ruin_at].date()} "
-              f"(day {ruin_at} of {len(common)}) - truncated there ***\n")
+        print(f"*** account wiped out on {dates[ruin_at].date()} "
+              f"(day {ruin_at} of {len(dates)}) - truncated there ***\n")
 
     years = len(portfolio) / BUSINESS_DAYS
 
@@ -412,7 +428,7 @@ def main():
         print(f"dividends   {paid:,.0f} {HOME_CURRENCY}  "
               f"({paid/years:,.0f}/yr, net of {US_WITHHOLDING:.0%} "
               f"withholding)")
-   
+
     PORTFOLIO_DIR.mkdir(parents=True, exist_ok=True)
     stem = '_'.join(sorted(built))
     summary.to_csv(PORTFOLIO_DIR / f'turnover_{stem}.csv')

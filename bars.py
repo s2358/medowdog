@@ -6,6 +6,8 @@ One request will not reach back far enough, so the window is walked backwards un
 An empty response is ambiguous - the end of the history, a timeout, or a pacing violation - so it is
 requested once more before being accepted. `complete` is then decided from how far back the bars reach, not from which condition stopped the walk.
 
+The head timestamp is what IBKR claims to hold, which is not always what it serves: TLT reports a head in 2002 and returns nothing before 2016-02-03, the date its listing moved to NASDAQ. A walk that trusted the head alone would keep asking for data that does not come. The gap is reported and the frame is marked incomplete rather than treated as an error.
+
 Callers build their own contracts.
 """
 
@@ -29,7 +31,6 @@ RETRY_PAUSE = 10.0
 HEAD_SLACK_DAYS = 30
 
 
-
 def drop_unsettled(frame, closes_at=time(17, 0), now=None):
     """
     Remove a final bar belonging to a session that has not closed yet.
@@ -50,7 +51,10 @@ def drop_unsettled(frame, closes_at=time(17, 0), now=None):
 
 def _as_date(value):
     """A bar date or head timestamp as a plain date, whatever it arrives as."""
-    stamp = pd.Timestamp(value)
+    try:
+        stamp = pd.Timestamp(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"not a usable date: {value!r}") from exc
     if stamp.tzinfo is not None:
         stamp = stamp.tz_convert('UTC').tz_localize(None)
     return stamp.date()
@@ -84,6 +88,25 @@ def _request(ib, contract, what, use_rth, chunk, end, timeout):
             )
 
 
+def _frame(bars):
+    """
+    One response as a DataFrame, or None when it is unusable.
+
+    A refused request comes back as an empty list, but a malformed one can
+    come back as something util.df turns into a frame with no dates in it.
+    Both mean the same thing here - nothing was served - and neither should
+    reach the caller as a type error from pandas.
+    """
+    from ib_async import util
+
+    if not bars:
+        return None
+    frame = util.df(bars)
+    if frame is None or frame.empty or 'date' not in frame.columns:
+        return None
+    return frame
+
+
 def daily(ib, contract, what, use_rth=True, chunk=CHUNK, max_chunks=MAX_CHUNKS, pause=PAUSE, timeout=120, label=None):
     """
     Daily bars, oldest first, as (DataFrame, complete).
@@ -91,26 +114,26 @@ def daily(ib, contract, what, use_rth=True, chunk=CHUNK, max_chunks=MAX_CHUNKS, 
 
     Bar dates are left exactly as ib_async returns them, so a caller writing a CSV keeps the format it already has.
     """
-    from ib_async import util
-    
     name = label or getattr(contract, 'symbol', '?')
     head = head_date(ib, contract, what, use_rth, name)
 
     frames, end, previous_first, stalled = [], '', None, False
 
     for _ in range(max_chunks):
-        bars = _request(ib, contract, what, use_rth, chunk, end, timeout)
-        if not bars:
+        frame = _frame(_request(ib, contract, what, use_rth, chunk, end,
+                                timeout))
+        if frame is None:
             # empty is ambiguous. Pause and ask once more before believing it.
             ib.sleep(RETRY_PAUSE)
-            bars = _request(ib, contract, what, use_rth, chunk, end, timeout)
-        if not bars:
-            print(f"  {name} {what}: empty twice ending {end or 'now'}, "
+            frame = _frame(_request(ib, contract, what, use_rth, chunk, end,
+                                    timeout))
+        if frame is None:
+            print(f"  {name} {what}: nothing served ending {end or 'now'}, "
                   f"stopping")
             break
 
-        frames.append(util.df(bars))
-        first = _as_date(bars[0].date)
+        frames.append(frame)
+        first = _as_date(frame['date'].iloc[0])
 
         if head is not None and first <= head:
             break       # reached the contract's first bar
@@ -138,6 +161,9 @@ def daily(ib, contract, what, use_rth=True, chunk=CHUNK, max_chunks=MAX_CHUNKS, 
     start = _as_date(out['date'].iloc[0])
     reached_head = head is not None and (start - head).days <= HEAD_SLACK_DAYS
     complete = reached_head or (stalled and head is None)
+
+    if head is not None and not reached_head:
+        print(f"  {name} {what}: head timestamp says {head}, nothing served "
+              f"before {start} - {(start - head).days} days short")
+
     return out, complete
-
-

@@ -4,17 +4,18 @@ Run the trading sequence.
     python trade.py              # dry run, sends nothing
     python trade.py --place      # transmits
 
-Steps in order: reconcile, orders, fills. Everything each step prints goes to
-the terminal and to logs/trade_<timestamp>.log, and the sequence stops at the
-first failure.
+Steps in order: capital, reconcile, orders, fills. Everything each step prints
+goes to the terminal and to logs/trade_<timestamp>.log, and the sequence stops
+at the first failure.
 
-The order is the point. Reconcile refuses to continue unless every share held
-is explained by a recorded execution, so orders are never sized against a
-book whose history has a hole in it. Fills runs last and records what the
-orders got.
+The order is the point. Capital leads so the staleness limit on the account
+value can never be the thing that stops a trade. Reconcile then refuses to
+continue unless every share held is explained by a recorded execution, so
+orders are never sized against a book whose history has a hole in it. Fills
+runs last and records what the orders got.
 
-Only the order step is told about --place. The other two never write anything
-to the broker.
+Only the order step is told about --place. The others never write anything to
+the broker.
 
 An order still working when fills runs is not yet in the record. Run fills.py
 again later to pick it up.
@@ -28,6 +29,7 @@ from run import emit, run_step, RULE, LOG_DIR
 
 def steps(place):
     return [
+            ('capital',   ['capital.py']),
             ('reconcile', ['reconcile.py']),
             ('orders',    ['orders.py'] + (['--place'] if place else [])),
             ('fills',     ['fills.py']),

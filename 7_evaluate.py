@@ -189,14 +189,27 @@ def log_ticks(lo, hi):
     return ticks or [lo, hi]
 
 
-def pct_ticks(low):
-    """Ticks from 0 down past low, in 10 or 20 point steps."""
-    step = 0.1 if low > -0.35 else 0.2
+def pct_ticks(low, target=5):
+    """
+    Ticks from zero down to the deepest drawdown, spaced to fit the range.
+
+    A fixed ten-point step puts every line but zero off the canvas when the
+    worst drawdown is a fraction of a percent, which is what a young live
+    curve looks like. The step comes off a ladder instead, chosen as the
+    coarsest one that still gives a few lines.
+    """
+    if low >= 0:
+        return [0.0]
+    ladder = (0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5)
+    step = next((s for s in ladder if abs(low) / s <= target), ladder[-1])
+
+    # stop at the chart floor rather than at the data, so no line is drawn
+    # outside the panel
     ticks, v = [], 0.0
-    while v > low - step:
+    while v >= low * 1.06:
         ticks.append(round(v, 4))
         v -= step
-    return ticks
+    return ticks or [0.0]
 
 
 def path_from(xs, ys):
@@ -254,12 +267,15 @@ def drawdown_svg(dd, height=200):
     def y_of(v):
         return PAD_T + (v / floor) * span_px if floor else PAD_T
 
+    # enough decimals that two neighbouring ticks do not print the same label
+    places = 0 if abs(low) >= 0.05 else 1 if abs(low) >= 0.005 else 2
+
     ys = [y_of(v) for v in dd.values]
     area = (path_from(xs, ys)
             + f" L{xs[-1]:.1f},{y_of(0):.1f} L{xs[0]:.1f},{y_of(0):.1f} Z")
     body = [
-        axis_svg(xs, dd.index, pct_ticks(low), lambda v: f"{v:.0%}", y_of,
-                 height),
+        axis_svg(xs, dd.index, pct_ticks(low),
+                 lambda v: f"{v:.{places}%}", y_of, height),
         f'<path class="area" d="{area}"/>',
         f'<path class="negline" d="{path_from(xs, ys)}"/>',
     ]

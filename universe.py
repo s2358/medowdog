@@ -18,7 +18,9 @@ from pathlib import Path
 STOCK_COMMISSION = {'per_share': 0.005, 'minimum': 1.00, 'max_pct': 0.01}
 
 # per-contract fees are commission plus exchange and regulatory charges, and
-# differ by contract - check each against a real fill before trusting it
+# differ by contract - check each against a real fill before trusting it.
+# Nothing carries this today; it is kept as the record of what a micro
+# contract costs, from when futures were costed.
 MICRO_COMMISSION = {'per_contract': 0.62}
 
 INSTRUMENTS = {
@@ -49,32 +51,37 @@ INSTRUMENTS = {
         'tick': 0.01,
         'commission': STOCK_COMMISSION,
     },
-    'MCL': {
+
+    # candidates, described but not traded. Each covers a sector the book has
+    # no exposure to: rates, currency, energy. TLT was the obvious rates
+    # choice and is not here - IBKR serves it only from 2016-02-03, when its
+    # listing moved to NASDAQ, where EDV goes back to 2007.
+    'EDV': {
         'weight': 0.0,
-        'type': 'FUT',
-        'exchange': 'NYMEX',
+        'type': 'STK',
+        'exchange': 'SMART',
         'currency': 'USD',
-        'multiplier': 100,          # barrels
+        'multiplier': 1,
         'tick': 0.01,
-        'commission': MICRO_COMMISSION,
+        'commission': STOCK_COMMISSION,
     },
-    '10Y': {
+    'FXY': {
         'weight': 0.0,
-        'type': 'FUT',
-        'exchange': 'CBOT',
+        'type': 'STK',
+        'exchange': 'SMART',
         'currency': 'USD',
-        'multiplier': 1000,         # 10 USD per basis point, 100 bp a point
-        'tick': 0.001,
-        'commission': MICRO_COMMISSION,
+        'multiplier': 1,
+        'tick': 0.01,
+        'commission': STOCK_COMMISSION,
     },
-    'MJY': {
+    'USO': {
         'weight': 0.0,
-        'type': 'FUT',
-        'exchange': 'CME',
+        'type': 'STK',
+        'exchange': 'SMART',
         'currency': 'USD',
-        'multiplier': 1250000,      # yen
-        'tick': 0.0000005,
-        'commission': MICRO_COMMISSION,
+        'multiplier': 1,
+        'tick': 0.01,
+        'commission': STOCK_COMMISSION,
     },
 }
 

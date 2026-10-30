@@ -6,17 +6,19 @@ Today's target positions.
 The shares to hold in each instrument right now, sized against the account
 value recorded by capital.py rather than any simulated equity.
 
-Only the latest row of each features file is used, taken on the last date
-every instrument traded. No history is walked, so none of what the backtest
-needs - measured costs, dividends, financing rates - is read here, and a
-fault in any of them cannot stop the targets being written.
+Only the latest row of each features file is used, each instrument on its own
+last trading date. Instruments do not share a calendar, so there is no date
+all of them have; a file that lags the others by more than TARGET_STALE_DAYS
+is a failed download rather than a holiday, and the run refuses it. No
+history is walked, so none of what the backtest needs - measured costs,
+dividends, financing rates - is read here, and a fault in any of them cannot
+stop the targets being written.
 
 Writes data/portfolio/live_targets.csv, which the order script reads.
 """
 
 import os
 import sys
-from pathlib import Path
 from datetime import datetime
 
 import numpy as np
@@ -25,7 +27,7 @@ import pandas as pd
 import capital
 import fx_data
 import sizing
-from config import VOL_TARGET, HOME_CURRENCY, WARMUP, PORTFOLIO_DIR
+from config import (VOL_TARGET, HOME_CURRENCY, WARMUP, PORTFOLIO_DIR, TARGET_STALE_DAYS, BENCHMARK_FILE)
 from universe import ticker_from_path
 
 TARGETS_FILE = 'live_targets.csv'
@@ -65,46 +67,86 @@ def load_allocation(path):
     return alloc['instrument_weight'].to_dict(), float(idm)
 
 
-def common_index(frames):
+def on_index(frame, index):
     """
-    The dates every instrument traded.
+    The frame on a shared index, carried forward within its own span.
 
-    A position is a portfolio decision, so it can only be taken on a day the
-    whole portfolio has a price for.
+    Before the instrument's first row it stays empty, which is what makes the
+    position flat rather than wrong. After it, a day the instrument did not
+    trade repeats the last close, so the P&L for that day is zero.
     """
-    common = None
-    for df in frames.values():
-        common = df.index if common is None else common.intersection(df.index)
-    if common is None or len(common) == 0:
-        raise ValueError("the instruments share no trading days")
-    return common
+    aligned = frame.reindex(index)
+    live = index >= frame.index[0]
+    aligned.loc[live] = aligned.loc[live].ffill()
+    return aligned
+
+
+def support_start(path=BENCHMARK_FILE):
+    """
+    The first date both support series cover.
+
+    Every row needs an fx rate to convert its P&L and a benchmark rate to
+    price its borrowing. The instruments' own price history reaches further
+    back than either, so the support series set the start, not the prices.
+
+    The benchmark borrows nothing and so needs only the fx series, but it
+    uses this same date anyway: a comparison over a different window is not
+    a comparison.
+    """
+    rates = pd.read_csv(path, parse_dates=['observation_date'])
+    return max(fx_data.load_series().index[0],
+               rates['observation_date'].iloc[0])
+
+
+
+def latest_rows(frames, stale_days=TARGET_STALE_DAYS):
+    """
+    Each instrument's own last row, and the newest date among them.
+
+    Instruments do not all trade on the same calendar, so there is no single
+    date every one of them has. A file further behind than the others is not
+    a holiday, though - it is a download that did not happen, and sizing from
+    it would set today's position from a stale forecast.
+    """
+    newest = max(frame.index[-1] for frame in frames.values())
+    rows, behind = {}, []
+    for ticker, frame in frames.items():
+        last = frame.index[-1]
+        if (newest - last).days > stale_days:
+            behind.append(f"{ticker} {last.date()}")
+        rows[ticker] = frame.loc[last]
+    if behind:
+        raise ValueError(f"the newest data is {newest.date()}, but "
+                         f"{', '.join(behind)} is behind it - re-run the "
+                         "downloader")
+    return rows, newest
 
 
 def live_targets(frames, weights, idm, capital_usd, vol_target):
     """Today's positions, sized against the capital actually held."""
-    asof = common_index(frames)[-1]
+    rows, newest = latest_rows(frames)
     daily_target = sizing.daily_cash_vol_target(capital_usd, vol_target)
 
-    rows = []
+    built = []
     for ticker in sorted(frames):
-        last = frames[ticker].loc[asof]
-        ivv = last['icv']
+        last = rows[ticker]
+        icv = last['icv']
         forecast = last['combined_forecast']
-        vol_scalar = sizing.volatility_scalar(daily_target, ivv)
-        target = sizing.target_position(forecast, ivv, daily_target,
+        vol_scalar = sizing.volatility_scalar(daily_target, icv)
+        target = sizing.target_position(forecast, icv, daily_target,
                                         weights[ticker], idm)
-        rows.append({
+        built.append({
             'ticker': ticker,
-            'date': asof.date(),
+            'date': last.name.date(),
             'close': last['close'],
             'combined_forecast': forecast,
-            'icv': ivv,
+            'icv': icv,
             'vol_scalar': vol_scalar,
             'subsystem_position': forecast / 10 * vol_scalar,
             'portfolio_position': target,
             'rounded': sizing.round_half_away(target),
         })
-    return pd.DataFrame(rows).set_index('ticker')
+    return pd.DataFrame(built).set_index('ticker')
 
 
 def main():
@@ -129,12 +171,15 @@ def main():
         raise KeyError(f"no weight in allocation file for: {sorted(missing)}")
 
     live = live_targets(frames, weights, idm, capital_usd, VOL_TARGET)
-
+    dates = sorted(set(live['date']))
+    asof = (f"{dates[-1]}" if len(dates) == 1
+            else f"{dates[-1]}, oldest {dates[0]}")
+    
     print(f"capital {account_value:,.0f} {HOME_CURRENCY} = "
           f"{capital_usd:,.0f} USD at {spot:.5f}   "
           f"read {age.total_seconds() / 3600:.1f}h ago   "
           f"vol target {VOL_TARGET:.0%}   IDM {idm:.4f}")
-    print(f"targets as of {live['date'].iloc[0]}\n")
+    print(f"targets as of {asof}\n")
     print(live[['close', 'combined_forecast', 'rounded']].round(2).to_string())
 
     PORTFOLIO_DIR.mkdir(parents=True, exist_ok=True)

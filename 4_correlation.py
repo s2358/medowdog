@@ -4,9 +4,11 @@ Subsystem-return correlations, instrument weights and the IDM.
     python 4_correlations.py <csv> <csv> [<csv> ...]
 
 Writes three files to data/correlations/:
-    subsystem_returns_<tickers>.csv     the aligned panel
+    subsystem_returns_<tickers>.csv     the panel
     correlation_matrix_<tickers>.csv    the negatives floored at zero
     allocation_<tickers>.csv            weights + IDM, read by script 6
+
+Instruments are joined on every date any of them traded rather than only the dates all of them did, so one short history does not shorten the rest. Each correlation is then measured on its own pair's overlap.
 
 Everything is computed before anything is written, so a bad WEIGHTS dict fails before it can leave a half updated allocation file on disk.
 """
@@ -28,18 +30,22 @@ def load_subsystem_returns(path):
 
 def build_panel(paths):
     """
-    The aligned panel of subsystem returns, restricted to the backtest window.
+    The panel of subsystem returns, restricted to the backtest window.
 
     The window matters here: the multiplier is an estimate from the data, so
     an out-of-sample run must not compute it from rows the run is pretending
     not to have seen.
+
+    Gaps are left empty rather than dropped. A row where one instrument did
+    not yet exist is still a real row for the others, and discarding it would
+    throw away the history the longer instruments have.
     """
     series = [load_subsystem_returns(p) for p in paths]
     names = [s.name for s in series]
     duplicates = {n for n in names if names.count(n) > 1}
     if duplicates:
         raise ValueError(f"same ticker given more than once: {sorted(duplicates)}")
-    panel = pd.concat(series, axis=1, join='inner').dropna()
+    panel = pd.concat(series, axis=1, join='outer')
 
     if WINDOW_START is not None:
         panel = panel[panel.index >= pd.Timestamp(WINDOW_START)]
@@ -50,11 +56,31 @@ def build_panel(paths):
     return panel
 
 
-def correlation_matrix(panel, floor_negatives=True):
-    H = panel.corr()
-    if floor_negatives:
-        H = H.clip(lower=0)
-    return H
+def pair_rows(panel, a, b):
+    """Rows on which both instruments have a return."""
+    return int((panel[a].notna() & panel[b].notna()).sum())
+
+
+def pairwise_correlations(panel, min_rows=BUSINESS_DAYS):
+    """
+    Each correlation measured on its own pair's overlap.
+
+    A pair with less than a year of shared history is not estimated at all.
+    The number would be noise, and it would go straight into the IDM, where
+    nothing downstream could tell it from a measurement.
+    """
+    raw = panel.corr(min_periods=min_rows)
+    thin = [f"{a}/{b} ({pair_rows(panel, a, b)} rows)"
+            for i, a in enumerate(raw.columns) for b in raw.columns[i + 1:]
+            if np.isnan(raw.loc[a, b])]
+    if thin:
+        raise ValueError(f"under {min_rows} rows of overlap: {', '.join(thin)}")
+    return raw
+
+
+def correlation_matrix(raw, floor_negatives=True):
+    return raw.clip(lower=0) if floor_negatives else raw
+
 
 def correlation_standard_error(r, n):
     """
@@ -87,18 +113,33 @@ def main():
     panel = build_panel(paths)
     n = len(panel)
 
-    raw = panel.corr()
-    H = correlation_matrix(panel)
-    idm, v = instrument_diversification_multiplier(H, WEIGHTS)
-    
+    raw = pairwise_correlations(panel)
+    H = correlation_matrix(raw)
+
+    # the matrix covers every file given, so a candidate can be measured
+    # against the book before it is given a weight. The multiplier is only
+    # defined over what is actually traded.
+    traded = [c for c in H.columns if c in WEIGHTS]
+    extra = [c for c in H.columns if c not in WEIGHTS]
+    idm, v = instrument_diversification_multiplier(
+            H.loc[traded, traded], WEIGHTS)
+
     allocation = pd.DataFrame({
-        'ticker': list(H.columns),
-        'instrument_weight': [WEIGHTS[c] for c in H.columns],
+        'ticker': traded,
+        'instrument_weight': [WEIGHTS[c] for c in traded],
         'idm': idm,
         })
 
-    print(f"overlapping window: {panel.index[0].date()} -> {panel.index[-1].date()}")
+    print(f"window: {panel.index[0].date()} -> {panel.index[-1].date()}")
     print(f"rows: {n} ({n /BUSINESS_DAYS:.1f} years)\n")
+
+    print("rows and annualised vol per subsystem:")
+    for col in panel.columns:
+        rows = int(panel[col].notna().sum())
+        vol = panel[col].std() * np.sqrt(BUSINESS_DAYS)
+        print(f"  {col:6s} {rows:6d} rows   {vol:.1%}   "
+              f"from {panel[col].first_valid_index().date()}")
+    print()
 
     print("correlation matrix (raw):")
     print(raw.round(3).to_string(), "\n")
@@ -112,22 +153,24 @@ def main():
     for i, a in enumerate(cols):
         for b in cols[i + 1:]:
             r = raw.loc[a, b]
-            se = correlation_standard_error(r, n)
+            shared = pair_rows(panel, a, b)
+            se = correlation_standard_error(r, shared)
             print(f"  {a:6s} {b:6s}  r  {r:+.3f}  se  {se:.3f}  "
-                  f"95% ci [{r - 1.96 * se:+.3f}, {r + 1.96 * se:+.3f}]")
+                  f"95% ci [{r - 1.96 * se:+.3f}, {r + 1.96 * se:+.3f}]  "
+                  f"on {shared} shared rows")
 
-    print("\nannualised vol of each subsystem over this window:")
-    for col in panel.columns:
-        print(f"  {col:6s} {panel[col].std() * np.sqrt(BUSINESS_DAYS):.1%}")
-    
     print("\ninstrument weights:")
-    for c in H.columns:
+    for c in traded:
         print(f" {c:6s} {WEIGHTS[c]:.0%}")
+    if extra:
+        print(f" not weighted: {', '.join(extra)}")
+
     print(f"W x H x W' = {v:.5f}")
     print(f"IDM        = {idm:.4f}" + ("  (capped)" if idm == IDM_CAP else ""))
 
     CORRELATIONS_DIR.mkdir(parents=True, exist_ok=True)
     stem = '_'.join(sorted(panel.columns))
+    traded_stem = '_'.join(sorted(traded))
 
     out = CORRELATIONS_DIR / f'subsystem_returns_{stem}.csv'
     panel.to_csv(out)
@@ -136,8 +179,8 @@ def main():
     corr_out = CORRELATIONS_DIR / f'correlation_matrix_{stem}.csv'
     H.to_csv(corr_out)
     print(f"correlation matrix written to {corr_out}")
-        
-    alloc_out = CORRELATIONS_DIR / f'allocation_{stem}.csv'
+
+    alloc_out = CORRELATIONS_DIR / f'allocation_{traded_stem}.csv'
     allocation.to_csv(alloc_out, index=False)
     print(f"allocation written to {alloc_out}")
 

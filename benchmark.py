@@ -3,7 +3,7 @@ Buy and hold benchmark on the same instruments.
 
     python benchmark.py <allocation_csv> <instrument_csv> [<instrument_csv> ...]
 
-Fixed weights, no leverage, rebalanced back to those weights on the first trading day of each year. Whole shares only, so a little cash sits idle.
+Fixed weights, no leverage, rebalanced back to those weights on the first trading day of each year. An instrument that has not launched yet cannot be held, so until it does its weight is shared out over the others. Whole shares only, so a little cash sits idle.
 
 Capital, window, weights, costs, dividends and exchange rates are the ones the trading system uses, leaving the strategy as the only difference.
 
@@ -18,7 +18,9 @@ import pandas as pd
 import capital
 import dividends
 import fx_data
-from config import (HOME_CURRENCY, BUSINESS_DAYS, WARMUP, US_WITHHOLDING, PORTFOLIO_DIR, COSTS_DIR)
+from config import (HOME_CURRENCY, BUSINESS_DAYS, WARMUP, US_WITHHOLDING,
+                    PORTFOLIO_DIR, COSTS_DIR, WINDOW_START, WINDOW_END)
+from targets import on_index, support_start
 from universe import ticker_from_path
 
 
@@ -95,19 +97,23 @@ def run(prices, weights, capital0, costs=None, income=None):
         # 1. yesterday's holding meets today's price, and is paid what went ex
         change, paid = 0.0, 0.0
         for t in tickers:
-            if i > 0:
+            if i > 0 and held[t] != 0:
                 change += held[t] * (close[t][i] - close[t][i - 1])
             paid += held[t] * income[t][i]
         cash += paid
         day_income[i] = paid
         gross_pnl[i] = change + paid
 
-        # 2. on the first row and at each turn of the year, buy back to weight
-        if i == 0 or index[i].year != index[i -1].year:
-            value = cash + sum(held[t] * close[t][i] for t in tickers)
+        # 2. on the first row and at each turn of the year, buy back to
+        # weight - over the instruments that exist yet, since one that has
+        # not launched cannot be held and its weight has to go somewhere
+        if i == 0 or index[i].year != index[i - 1].year:
+            live = [t for t in tickers if np.isfinite(close[t][i])]
+            share = sum(weights[t] for t in live)
+            value = cash + sum(held[t] * close[t][i] for t in live)
             spend = 0.0
-            for t in tickers:
-                target = np.floor(value * weights[t] / close[t][i])
+            for t in live:
+                target = np.floor(value * (weights[t] / share) / close[t][i])
                 trade = target - held[t]
                 cash -= trade * close[t][i]
                 if costs and t in costs:
@@ -117,7 +123,8 @@ def run(prices, weights, capital0, costs=None, income=None):
             day_costs[i] = spend
             rebalanced[i] = True
 
-        equity[i] = cash + sum(held[t] * close[t][i] for t in tickers)
+        equity[i] = cash + sum(held[t] * close[t][i]
+                               for t in tickers if held[t] != 0)
 
     return index, equity, gross_pnl, day_income, day_costs, rebalanced
 
@@ -141,16 +148,32 @@ def main():
     if missing:
         raise KeyError(f"no weight in allocation file for: {sorted(missing)}")
 
-    # restrict every instrument to the common trading days
-    common = None
+    # the same calendar the system runs on: every day any instrument traded,
+    # trimmed to where the support series reach and then to the configured
+    # window, so the two curves cover exactly the same days
+    dates = None
     for series in prices.values():
-        common = (series.index if common is None
-                  else common.intersection(series.index))
-    prices = {t: s.loc[common] for t, s in prices.items()}
+        dates = series.index if dates is None else dates.union(series.index)
+
+    start = support_start()
+    if dates[0] < start:
+        dropped = int((dates < start).sum())
+        print(f"trimmed {dropped} rows before {start.date()}, where the "
+              "support series begin")
+        dates = dates[dates >= start]
+
+    if WINDOW_START is not None:
+        dates = dates[dates >= pd.Timestamp(WINDOW_START)]
+    if WINDOW_END is not None:
+        dates = dates[dates < pd.Timestamp(WINDOW_END)]
+    if len(dates) == 0:
+        raise ValueError("the configured window leaves no rows")
+
+    prices = {t: on_index(s, dates) for t, s in prices.items()}
 
     costs, costs_file = load_costs()
-    income = load_income(sorted(prices), common)
-    fx = load_fx(common)
+    income = load_income(sorted(prices), dates)
+    fx = load_fx(dates)
     capital0 = account_value / fx[0]
 
     print(f"capital {account_value:,.0f} {HOME_CURRENCY} = {capital0:,.0f} USD "
@@ -158,8 +181,8 @@ def main():
     print("weights  " + "   ".join(f"{t} {weights[t]:.0%}"
                                    for t in sorted(prices)))
     print(f"costs: {costs_file if costs_file else 'not measured - gross only'}")
-    print(f"window: {common[0].date()} -> {common[-1].date()}  "
-          f"({len(common)} rows)\n")
+    print(f"window: {dates[0].date()} -> {dates[-1].date()}  "
+          f"({len(dates)} rows)\n")
 
     index, equity, gross_pnl, day_income, day_costs, rebalanced = run(
         prices, weights, capital0, costs, income)

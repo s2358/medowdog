@@ -3,23 +3,33 @@ Record the account value that position sizing uses.
 
     python capital.py
 
-Net liquidation value is the figure used for capital. cash plus the market value of everything held, in the account's base currency.
+Net liquidation value is the figure used for capital: cash plus the market
+value of everything held, in the account's base currency.
+
+Two files. capital.json holds the latest reading, which is all position
+sizing needs. readings.csv holds every reading ever taken and is never
+rewritten - without it there is no record of what the account did, only of
+what the simulation did.
 
 The change since the last reading is printed.
 
-Write data/capital.json.
+Writes data/capital.json and appends to data/capital/readings.csv.
 """
 
+import csv
 import json
 from datetime import datetime, timedelta
+
 from account import summary
 from config import DATA_DIR, CAPITAL_MAX_AGE_HOURS
 
 CAPITAL_FILE = DATA_DIR / 'capital.json'
+READINGS_FILE = DATA_DIR / 'capital' / 'readings.csv'
 TAG = 'NetLiquidation'
 
+
 def fetch():
-    """Net liquidation value, its currency, and he account it belongs to."""
+    """Net liquidation value, its currency, and the account it belongs to."""
     accounts, values = summary()
     found = next((v for v in values if v.tag == TAG), None)
     if found is None:
@@ -37,8 +47,7 @@ def load(max_age_hours=CAPITAL_MAX_AGE_HOURS):
     The stored account value and its age.
 
     Risk is scaled to the capital actually held, so a figure older than the
-    limit is refused rather than used. Pass None to read it regardless, which
-    is what this script does when reporting the change since last time.
+    limit is refused rather than used. Pass None to read it regardless.
     """
     if not CAPITAL_FILE.exists():
         raise FileNotFoundError(f"{CAPITAL_FILE} not found - run capital.py first")
@@ -52,6 +61,30 @@ def load(max_age_hours=CAPITAL_MAX_AGE_HOURS):
     return stored, age
 
 
+def record(reading, path=READINGS_FILE):
+    """
+    Append one reading to the permanent record.
+
+    Duplicates are kept: two runs an hour apart are two true observations of
+    the account, and deciding which one counts belongs further downstream.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fresh = not path.exists()
+    if not fresh and path.stat().st_size:
+        with path.open('rb') as existing:
+            existing.seek(-1, 2)
+            if existing.read(1) != b'\n':
+                with path.open('a') as repair:
+                    repair.write('\n')
+    with path.open('a', newline='') as out:
+        writer = csv.writer(out)
+        if fresh:
+            writer.writerow(['read_at', 'account', 'value', 'currency'])
+        writer.writerow([reading['fetched_at'], reading['account'],
+                         f"{reading['value']:.2f}", reading['currency']])
+    return path
+
+
 def main():
     previous = None
     if CAPITAL_FILE.exists():
@@ -60,6 +93,7 @@ def main():
     current = fetch()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     CAPITAL_FILE.write_text(json.dumps(current, indent=2))
+    readings = record(current)
 
     print(f"{current['fetched_at']}  account {current['account']}")
     line = f"  capital {current['value']:,.2f} {current['currency']}"
@@ -69,8 +103,7 @@ def main():
         line += (f"  {change:+,.2f} ({pct:+.2f}%) since "
                  f"{previous['fetched_at']}")
     print(line)
-    print(f"written to {CAPITAL_FILE}")
-
+    print(f"written to {CAPITAL_FILE}, appended to {readings}")
 
 
 if __name__ == '__main__':

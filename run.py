@@ -76,6 +76,7 @@ STEPS = [
         ('dividends',      lambda: ['dividends.py']),
 #        ('reconcile',      lambda: ['reconcile.py']),
         ('capital',        lambda: ['capital.py']),
+        ('equity',         lambda: ['equity.py']),
         ('targets',        lambda: ['targets.py', allocation_csv()]
                                     + features_csvs()),
         ('position sizing',lambda: ['6_position_sizing.py', allocation_csv()]
