@@ -1,23 +1,29 @@
 """
-Subsystem-return correlations, instrument weights and the IDM.
+Subsystem-return correlations and the IDM.
 
-    python 4_correlations.py <csv> <csv> [<csv> ...]
+    python 4_correlation.py <csv> <csv> [<csv> ...]
 
 Writes three files to data/correlations/:
     subsystem_returns_<tickers>.csv     the panel
     correlation_matrix_<tickers>.csv    the negatives floored at zero
-    allocation_<tickers>.csv            weights + IDM, read by script 6
+    allocation_<tickers>.csv            weights + IDM, a record of the run
+
+This script measures. It does not set anything. The live path and the backtest
+both read the IDM from config.py, the same way they read the FDM and the
+forecast scalars. To adopt a new value, edit config.py by hand. Nothing reads
+the allocation file; it is kept as the record of what was measured and when.
 
 Instruments are joined on every date any of them traded rather than only the dates all of them did, so one short history does not shorten the rest. Each correlation is then measured on its own pair's overlap.
 
-Everything is computed before anything is written, so a bad WEIGHTS dict fails before it can leave a half updated allocation file on disk.
+The matrix covers every file given. The multiplier covers only the instruments that carry a weight, so a candidate can be measured against the book before it is admitted to it.
 """
 
 import pandas as pd
 import numpy as np
 import os
 import sys
-from config import (IDM_CAP, WARMUP, BUSINESS_DAYS, CORRELATIONS_DIR, WINDOW_START, WINDOW_END)
+from config import (IDM_CAP, WARMUP, BUSINESS_DAYS, CORRELATIONS_DIR,
+                    WINDOW_START, WINDOW_END, IDM as IDM_IN_CONFIG)
 from universe import WEIGHTS, ticker_from_path
 
 
@@ -167,6 +173,12 @@ def main():
 
     print(f"W x H x W' = {v:.5f}")
     print(f"IDM        = {idm:.4f}" + ("  (capped)" if idm == IDM_CAP else ""))
+
+    change = idm - IDM_IN_CONFIG
+    print(f"config.py holds IDM = {IDM_IN_CONFIG:.4f}, "
+          f"a difference of {change:+.4f}")
+    if abs(change) > 1e-4:
+        print("nothing uses the measured value. To adopt it, edit config.py.")
 
     CORRELATIONS_DIR.mkdir(parents=True, exist_ok=True)
     stem = '_'.join(sorted(panel.columns))

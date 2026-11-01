@@ -1,11 +1,11 @@
 """
 Buy and hold benchmark on the same instruments.
 
-    python benchmark.py <allocation_csv> <instrument_csv> [<instrument_csv> ...]
+    python benchmark.py <instrument_csv> [<instrument_csv> ...]
 
 Fixed weights, no leverage, rebalanced back to those weights on the first trading day of each year. An instrument that has not launched yet cannot be held, so until it does its weight is shared out over the others. Whole shares only, so a little cash sits idle.
 
-Capital, window, weights, costs, dividends and exchange rates are the ones the trading system uses, leaving the strategy as the only difference.
+Capital, window, weights, costs, dividends and exchange rates are the ones the backtest uses, leaving the strategy as the only difference. Capital is BACKTEST_CAPITAL, the same fixed figure script 6 starts from.
 
 Writes benchmark.csv with the same columns as portfolio.csv:
     python 7_evaluate.py data/portfolio/benchmark.csv
@@ -15,33 +15,19 @@ import os
 import sys
 import numpy as np
 import pandas as pd
-import capital
 import dividends
 import fx_data
+import universe
 from config import (HOME_CURRENCY, BUSINESS_DAYS, WARMUP, US_WITHHOLDING,
-                    PORTFOLIO_DIR, COSTS_DIR, WINDOW_START, WINDOW_END)
+                    PORTFOLIO_DIR, WINDOW_START, WINDOW_END, BACKTEST_CAPITAL)
 from targets import on_index, support_start
-from universe import ticker_from_path
+from universe import ticker_from_path, WEIGHTS
 
 
 def load_prices(path):
     df = pd.read_csv(path, usecols=['date', 'close']).iloc[WARMUP:]
     df['date'] = pd.to_datetime(df['date'])
     return df.set_index('date')['close']
-
-
-def load_weights(path):
-    return pd.read_csv(path).set_index('ticker')['instrument_weight'].to_dict()
-
-
-def load_costs():
-    """Latest measured cost per share, per ticker. None if never measured."""
-    files = sorted(COSTS_DIR.glob('costs_*.csv')) if COSTS_DIR.exists() else []
-    if not files:
-        return None, None
-    latest = files[-1]
-    series = pd.read_csv(latest).set_index('ticker')['cost_per_share_C']
-    return series.to_dict(), latest.name
 
 
 def load_income(tickers, index):
@@ -130,62 +116,58 @@ def run(prices, weights, capital0, costs=None, income=None):
 
 
 def main():
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 2:
         print(f"Usage: python {os.path.basename(sys.argv[0])} "
-              "<allocation_csv> <instrument_csv> [<instrument_csv> ...]")
+              "<instrument_csv> [<instrument_csv> ...]")
         sys.exit(1)
 
-    stored, _ = capital.load()
-    if stored['currency'] != HOME_CURRENCY:
-        raise ValueError(f"the account is in {stored['currency']}, "
-                         f"the system reports in {HOME_CURRENCY}")
-    account_value = stored['value']
+    account_value = BACKTEST_CAPITAL
 
-    weights = load_weights(sys.argv[1])
-    prices = {ticker_from_path(p): load_prices(p) for p in sys.argv[2:]}
-
-    missing = set(prices) - set(weights)
+    prices = {ticker_from_path(p): load_prices(p) for p in sys.argv[1:]}
+    missing = set(prices) - set(WEIGHTS)
     if missing:
-        raise KeyError(f"no weight in allocation file for: {sorted(missing)}")
+        raise KeyError(f"no weight in the universe for: {sorted(missing)}")
 
     # the same calendar the system runs on: every day any instrument traded,
-    # trimmed to where the support series reach and then to the configured
-    # window, so the two curves cover exactly the same days
+    # cut to the configured window and then to where the support series
+    # reach, so the two curves cover exactly the same days
     dates = None
     for series in prices.values():
         dates = series.index if dates is None else dates.union(series.index)
-
-    start = support_start()
-    if dates[0] < start:
-        dropped = int((dates < start).sum())
-        print(f"trimmed {dropped} rows before {start.date()}, where the "
-              "support series begin")
-        dates = dates[dates >= start]
 
     if WINDOW_START is not None:
         dates = dates[dates >= pd.Timestamp(WINDOW_START)]
     if WINDOW_END is not None:
         dates = dates[dates < pd.Timestamp(WINDOW_END)]
+    
+    start = support_start()
+    if len(dates) and dates[0] < start:
+        dropped = int((dates < start).sum())
+        print(f"trimmed {dropped} rows before {start.date()}, where the "
+              "support series begin")
+        dates = dates[dates >= start]
+
     if len(dates) == 0:
         raise ValueError("the configured window leaves no rows")
 
     prices = {t: on_index(s, dates) for t, s in prices.items()}
 
-    costs, costs_file = load_costs()
+    costs = {t: universe.cost_per_share(t) for t in sorted(prices)}
     income = load_income(sorted(prices), dates)
     fx = load_fx(dates)
     capital0 = account_value / fx[0]
 
     print(f"capital {account_value:,.0f} {HOME_CURRENCY} = {capital0:,.0f} USD "
       f"at {fx[0]:.5f}")
-    print("weights  " + "   ".join(f"{t} {weights[t]:.0%}"
+    print("weights  " + "   ".join(f"{t} {WEIGHTS[t]:.0%}"
                                    for t in sorted(prices)))
-    print(f"costs: {costs_file if costs_file else 'not measured - gross only'}")
+    print("costs per share: "
+          + ", ".join(f"{t} {c:.5f}" for t, c in sorted(costs.items())))
     print(f"window: {dates[0].date()} -> {dates[-1].date()}  "
           f"({len(dates)} rows)\n")
 
     index, equity, gross_pnl, day_income, day_costs, rebalanced = run(
-        prices, weights, capital0, costs, income)
+        prices, WEIGHTS, capital0, costs, income)
 
     # the account is USD, so the home-currency curve revalues the whole
     # balance, not just the day's flows - the second term below is fx_pnl

@@ -6,7 +6,8 @@ calls it, what one unit is worth, how small a price move can be, and what a
 trade costs. Everything in config.py applies to the system as a whole.
 
 An instrument with zero weight is described but not traded: it stays listed
-so its contract and multiplier are ready before it is brought in.
+so its contract and multiplier are ready before it is brought in. A candidate
+has no cost_per_share until it is measured.
 
 Weights are handcrafted and must sum to 1 across the traded instruments.
 """
@@ -32,6 +33,7 @@ INSTRUMENTS = {
         'multiplier': 1,
         'tick': 0.01,
         'commission': STOCK_COMMISSION,
+        'cost_per_share': 0.02735,   # measured 2026-10-29
     },
     'GLDM': {
         'weight': 0.30,
@@ -41,6 +43,7 @@ INSTRUMENTS = {
         'multiplier': 1,
         'tick': 0.01,
         'commission': STOCK_COMMISSION,
+        'cost_per_share': 0.01,      # measured 2026-10-29
     },
     'SLV': {
         'weight': 0.30,
@@ -50,6 +53,7 @@ INSTRUMENTS = {
         'multiplier': 1,
         'tick': 0.01,
         'commission': STOCK_COMMISSION,
+        'cost_per_share': 0.01,      # measured 2026-10-29
     },
 
     # candidates, described but not traded. Each covers a sector the book has
@@ -150,6 +154,25 @@ def commission(ticker, quantity, price):
     return min(charged, model['max_pct'] * quantity * price)
 
 
+def cost_per_share(ticker):
+    """
+    Measured cost of trading one share: half the spread plus commission.
+
+    5_costs.py measures it and prints it. The figure is written into this
+    file by hand, because a cost is a property of the instrument, not of the
+    night it was sampled. Reading the newest measurement instead would let
+    one five-minute sample set the cost of nineteen years of history.
+
+    The commission part carries the per-order minimum divided by the trade
+    size, so a large change in account size needs a new measurement.
+    """
+    value = instrument(ticker).get('cost_per_share')
+    if value is None:
+        raise KeyError(f"{ticker} has no cost_per_share - run 5_costs.py "
+                       "and write the figure in")
+    return value
+
+
 def minimum_trade(ticker, price):
     """
     Smallest trade whose commission stays inside the ceiling.
@@ -187,6 +210,13 @@ def validate():
     total = sum(weights().values())
     if abs(total - 1.0) > 1e-9:
         raise ValueError(f"weights sum to {total:.6f}, expected 1.0")
+
+    # a traded instrument must have a cost. A candidate need not, because it
+    # cannot be measured until its price history exists.
+    uncosted = [t for t in traded
+                if INSTRUMENTS[t].get('cost_per_share') is None]
+    if uncosted:
+        raise ValueError(f"traded but no cost_per_share: {', '.join(uncosted)}")
 
 def ticker_from_path(path):
     """

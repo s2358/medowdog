@@ -1,24 +1,34 @@
 """
 Portfolio position sizing with compounding capital.
 
-    python 6_position_sizing.py data/correlations/allocation_GLDM_SLV_SPY.csv \
-        data/features/SPY.csv data/features/GLDM.csv data/features/SLV.csv
+    python 6_position_sizing.py data/features/SPY.csv data/features/GLDM.csv \
+        data/features/SLV.csv
 
-Capital comes from data/capital.json, the account value recorded by capital.py. Risk is a fraction of what the account holds, so the figure is read before every run rather than fixed in the configuration.
+Capital is fixed at BACKTEST_CAPITAL. This is research, not trading, so the result must not move because the live account moved. Nothing here reads the account, the allocation file, or anything else the live path writes.
 
-Capital is not constant. Each day's positions are sized against the equity
-produced by every prior day's P&L, which makes the whole calculation
-sequential: equity -> vol scalar -> position -> next day's P&L -> equity.
+Capital is not constant inside the run. Each day's positions are sized against the equity produced by every prior day's P&L, which makes the whole calculation sequential: equity -> vol scalar -> position -> next day's P&L -> equity.
 
-Costs are read from data/costs/ if a measurement exists and are deducted from
-equity as they are paid. The first run has no cost file and reports gross;
-once the cost script has run, re-run this and the compounding includes them.
+Costs come from universe.py, one figure per instrument: half the quoted spread plus commission, measured by 5_costs.py and written in by hand. COST_MULTIPLIER scales them all for a sensitivity run.
 
 Dividends are read from data/dividends/ and credited to whatever position was
 held into each ex-date, net of US withholding - negative when the position was
 short. A ticker with no file there contributes nothing.
 
-Margin financing is charged on the balance borrowed overnight - the value of the cash instruments held less equity, which assumes the account was converted to USD up front. A futures position is excluded: it borrows nothing, because the cost of carry is already in the contract's price. The rate is the Fed funds effective rate from data/rates/ plus FINANCING_SPREAD, accrued actual/360 on calendar days, so a Friday position carries three days of interest into Monday.
+The loop carries a cash balance, not only an equity figure. Buying a share spends cash, shorting one raises it, and a price change moves equity without touching cash at all. Equity is then cash plus the market value of what is held. The two numbers are needed separately because the broker charges on the cash balance, not on the account value.
+
+Three charges come out of that balance every calendar day, accrued actual/360, so a Friday position carries three days into Monday:
+
+  interest  the benchmark plus FINANCING_SPREAD on everything the broker has
+            lent - the short positions it holds shares against, plus any cash
+            debit. Measured over 23 to 26 October 2026, this base reproduces
+            the broker's own accrual to within four percent. The cash balance
+            alone does not: it implies rates above eight percent.
+  credit    the benchmark less CREDIT_SPREAD on a cash balance above
+            CASH_THRESHOLD. Paid, not charged.
+  borrow    BORROW_FEE on the market value of the short positions, whatever
+            the cash balance.
+
+A futures position is excluded from all three: it borrows nothing, because the cost of carry is already in the contract's price, and its profit settles into cash every day rather than sitting on the balance sheet.
 
 Gross leverage is capped at MAX_LEVERAGE. The broker's limit applies to the whole portfolio, so it can only be checked once every instrument has been sized - a second pass scales every position by the same factor and re-rounds. Whole block means the result lands near the cap rather than exactly on it.
 
@@ -35,31 +45,23 @@ import sys
 import numpy as np
 import pandas as pd
 
-import capital
 import sizing
 import dividends
 import fx_data
-from targets import load_instrument, load_allocation, on_index, support_start
+from targets import load_instrument, on_index, support_start
 import universe
-from universe import ticker_from_path
-from config import (VOL_TARGET, HOME_CURRENCY, BUSINESS_DAYS,
-                    INERTIA, US_WITHHOLDING, FINANCING_SPREAD, MAX_LEVERAGE,
+from universe import ticker_from_path, WEIGHTS
+from config import (VOL_TARGET, HOME_CURRENCY, BUSINESS_DAYS, BACKTEST_CAPITAL,
+                    INERTIA, US_WITHHOLDING, FINANCING_SPREAD, CREDIT_SPREAD,
+                    CASH_THRESHOLD, BORROW_FEE, MAX_LEVERAGE,
                     WINDOW_START, WINDOW_END, BENCHMARK_FILE, PORTFOLIO_DIR,
-                    COSTS_DIR, COST_MULTIPLIER)
+                    COST_MULTIPLIER, IDM)
 
 
-PER_TICKER_COLS = ('ivv', 'vol_scalar', 'subsystem_position',
+PER_TICKER_COLS = ('icv', 'vol_scalar', 'subsystem_position',
                    'portfolio_position', 'rounded', 'held', 'trade',
                    'notional', 'pnl', 'cost', 'dividend')
 
-def load_costs():
-    """Latest measured cost per share, per ticker. None if never measured."""
-    files = sorted(COSTS_DIR.glob('costs_*.csv')) if COSTS_DIR.exists() else []
-    if not files:
-        return None, None
-    latest = files[-1]
-    series = pd.read_csv(latest).set_index('ticker')['cost_per_share_C']
-    return (series * COST_MULTIPLIER).to_dict(), latest.name
 
 def load_income(tickers, index):
     """
@@ -85,11 +87,11 @@ def load_income(tickers, index):
     return out, missing
 
 
-def load_financing(index, path=BENCHMARK_FILE):
+def load_benchmark(index, path=BENCHMARK_FILE):
     """
-    Annual financing rate on each row, as a decimal.
+    The bare benchmark rate on each row, as a decimal.
 
-    FRED's DFF is in percent and covers every calendar day, but publishes a few days late, so the last rows forward-fill off the end of the file. IBKR Pro tier 1 charges this benchmark plus FINANCING_SPREAD.
+    FRED's DFF is in percent and covers every calendar day, but publishes a few days late, so the last rows forward-fill off the end of the file. The spreads are applied in the loop, because the debit side and the credit side move in opposite directions from this number.
     """
     raw = pd.read_csv(path, parse_dates=['observation_date'])
     rate = raw.set_index('observation_date')['DFF'] / 100
@@ -97,8 +99,8 @@ def load_financing(index, path=BENCHMARK_FILE):
     if aligned.isna().any():
         missing = aligned[aligned.isna()].index[0].date()
         raise ValueError(f"{path} has no rate on or before {missing}")
-    return (aligned + FINANCING_SPREAD).values
-    
+    return aligned.values
+
 
 def load_fx(index):
     """
@@ -113,7 +115,6 @@ def load_fx(index):
         raise ValueError(f"no FX rate on or before {missing} - "
                          "run: python fx_data.py")
     return aligned.values
-
 
 
 def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None, income=None, rates=None):
@@ -139,8 +140,9 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
     # times the contract size for a future
     value = {t: close[t] * universe.multiplier(t) for t in tickers}
 
-    # a future borrows nothing - the cost of carry is already in its price,
-    # so only cash instruments contribute to the overnight debit
+    # a future borrows nothing - the cost of carry is already in its price -
+    # and it holds no balance-sheet value, so only cash instruments sit in
+    # equity and only they are financed
     financed = {t: universe.instrument(t)['type'] == 'STK' for t in tickers}
 
     income = income or {t: np.zeros(n) for t in tickers}
@@ -156,19 +158,36 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
     cols = {t: {k: np.full(n, np.nan) for k in PER_TICKER_COLS}
             for t in tickers}
     equity = np.full(n, np.nan)
+    cash_at = np.full(n, np.nan)
+    short_at = np.zeros(n)
     gross_pnl = np.zeros(n)
     day_costs = np.zeros(n)
-    day_financing = np.zeros(n)
+    day_interest = np.zeros(n)
+    day_credit = np.zeros(n)
+    day_borrow = np.zeros(n)
     day_capped = np.zeros(n, dtype=bool)
     day_scale = np.ones(n)
 
-    cap = capital0
+    cash = capital0
     held_prev = {t: 0.0 for t in tickers}
-    debt_prev = 0.0
+
+    # what was on the books overnight, carried so that day i's accrual is
+    # charged on the balance that was actually held through the gap
+    borrowed_prev = 0.0
+    lent_prev = 0.0
+    short_prev = 0.0
     ruin_at = None
 
+    def book_value(i):
+        """Market value of everything that sits on the balance sheet."""
+        return sum(held_prev[t] * value[t][i]
+                   for t in tickers
+                   if financed[t] and held_prev[t] != 0)
+
     for i in range(n):
-        # 1. yesterday's position meets today's price, and is paid whatever went ex today
+        # 1. yesterday's position meets today's price, and is paid whatever
+        # went ex today. A dividend is cash. A price change is not, unless
+        # the instrument is a future, which settles its profit every day.
         total = 0.0
         for t in tickers:
             p = (held_prev[t] * (value[t][i] - value[t][i - 1])
@@ -177,35 +196,53 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
             cols[t]['pnl'][i] = p
             cols[t]['dividend'][i] = d
             total += p + d
+            cash += d
+            if not financed[t]:
+                cash += p
         gross_pnl[i] = total
-        cap += total
+
+        # 2. the money borrowed overnight is paid for at today's rate
+        debit_rate = rate[i] + FINANCING_SPREAD
+        credit_rate = max(0.0, rate[i] - CREDIT_SPREAD)
+        accrual = days[i] / 360
+
+        charged = borrowed_prev * debit_rate * accrual
+        earned = lent_prev * credit_rate * accrual
+        fee = short_prev * BORROW_FEE * accrual
+
+        day_interest[i] = charged
+        day_credit[i] = earned
+        day_borrow[i] = fee
+        cash += earned - charged - fee
+
+        cap = cash + book_value(i)
 
         if cap <= 0:
             ruin_at = i
             break
 
-        # 2. size today's positions against the equity we now hold
+        # 3. size today's positions against the equity we now hold
         daily_target = sizing.daily_cash_vol_target(cap, vol_target)
         want = {}
 
         for t in tickers:
-            ivv = icv[t][i]
-            vol_scalar = sizing.volatility_scalar(daily_target, ivv)
+            icv_i = icv[t][i]
+            vol_scalar = sizing.volatility_scalar(daily_target, icv_i)
             subsystem = fcast[t][i] / 10 * vol_scalar
-            target = sizing.target_position(fcast[t][i], ivv, daily_target,
+            target = sizing.target_position(fcast[t][i], icv_i, daily_target,
                                             weights[t], idm)
             rounded = (sizing.round_half_away(target)
                        if np.isfinite(target) else np.nan)
 
             c = cols[t]
-            c['ivv'][i] = ivv
+            c['icv'][i] = icv_i
             c['vol_scalar'][i] = vol_scalar
             c['subsystem_position'][i] = subsystem
             c['portfolio_position'][i] = target
             c['rounded'][i] = rounded
             want[t] = sizing.apply_inertia(rounded, held_prev[t], INERTIA)
 
-        # 2b. the cap is on the portfolio, so it can only be applied once
+        # 3b. the cap is on the portfolio, so it can only be applied once
         # every instrument has been sized. An instrument with no price yet is
         # not in the book and cannot contribute to gross notional.
         priced = [t for t in tickers if np.isfinite(value[t][i])]
@@ -215,9 +252,9 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
         want = {**want, **capped}
         day_capped[i] = scale < 1.0
         day_scale[i] = scale
-        
-        # 2c. Pay for the trades the capped positions imply, not the ones the 
-        # forecast asked for.
+
+        # 3c. Pay for the trades the capped positions imply, not the ones the
+        # forecast asked for. Buying spends cash and shorting raises it.
         spent = 0.0
         for t in tickers:
             new = want[t]
@@ -231,20 +268,29 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
             c['notional'][i] = new * value[t][i] if new != 0 else 0.0
             c['cost'][i] = cost
 
+            if financed[t] and trade != 0:
+                cash -= trade * value[t][i]
+            cash -= cost
             spent += cost
             held_prev[t] = new
-      
-        # 3. pay for the trades, and for the money borrowed overnight
-        financed_value = sum(abs(held_prev[t] * value[t][i])
-                             for t in tickers
-                             if financed[t] and held_prev[t] != 0)
-        charge = debt_prev * rate[i] / 360 * days[i]
 
         day_costs[i] = spent
-        day_financing[i] = charge
-        cap -= spent + charge
-        equity[i] = cap
-        debt_prev = max(0.0, financed_value - cap)
+
+        # 4. close the day. The broker lends two things: the shares behind
+        # every short, and whatever cash was spent beyond the balance. It
+        # charges on the sum of the two, and pays on a credit balance above
+        # the threshold.
+        short_value = sum(-held_prev[t] * value[t][i]
+                          for t in tickers
+                          if financed[t] and held_prev[t] < 0)
+
+        borrowed_prev = short_value + max(0.0, -cash)
+        lent_prev = max(0.0, cash - CASH_THRESHOLD)
+        short_prev = short_value
+
+        cash_at[i] = cash
+        short_at[i] = short_value
+        equity[i] = cash + book_value(i)
 
     # if the account was wiped out, keep only the days that happened
     end = ruin_at if ruin_at is not None else n
@@ -272,23 +318,31 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
     conv = fx[:end]
     prev_eq = np.concatenate(([capital0], eq[:-1]))
     prev_conv = np.concatenate(([conv[0]], conv[:-1]))
-    fx_pnl = prev_eq * (conv - prev_conv)   
+    fx_pnl = prev_eq * (conv - prev_conv)
 
     gross = gross_pnl[:end] * conv
     spent = day_costs[:end] * conv
-    charged = day_financing[:end] * conv
+    interest = day_interest[:end] * conv
+    credit = day_credit[:end] * conv
+    borrow = day_borrow[:end] * conv
+    financing = interest + borrow - credit
 
     portfolio = pd.DataFrame({
         'gross_pnl': gross,
         'dividend': paid * conv,
         'cost': spent,
-        'financing': charged,
+        'interest': interest,
+        'credit': credit,
+        'borrow': borrow,
+        'financing': financing,
         'capped': day_capped[:end],
         'cap_scale': day_scale[:end],
         'fx_pnl': fx_pnl,
-        'net_pnl': gross - spent - charged + fx_pnl,
+        'net_pnl': gross - spent - financing + fx_pnl,
         'equity': eq * conv,
         'equity_usd': eq,
+        'cash_usd': cash_at[:end],
+        'short_notional': short_at[:end] * conv,
         'fx': conv,
         'gross_notional': notional * conv,
     }, index=index)
@@ -319,27 +373,23 @@ def turnover_stats(df, years):
 
 
 def main():
-    if len(sys.argv) < 3:
-        print(f"Usage: python {os.path.basename(sys.argv[0])} <allocation_csv> "
+    if len(sys.argv) < 2:
+        print(f"Usage: python {os.path.basename(sys.argv[0])} "
               "<instrument_csv> [<instrument_csv> ...]")
         sys.exit(1)
 
-    stored, age = capital.load()
-    if stored['currency'] != HOME_CURRENCY:
-        raise ValueError(f"the account is in {stored['currency']}, "
-                         f"the system reports in {HOME_CURRENCY}")
-    account_value = stored['value']
+    account_value = BACKTEST_CAPITAL
     cached = fx_data.describe()
-    costs, costs_file = load_costs()
 
-    alloc_path, inst_paths = sys.argv[1], sys.argv[2:]
-    weights, idm = load_allocation(alloc_path)
-
+    inst_paths = sys.argv[1:]
     frames = {ticker_from_path(p): load_instrument(p) for p in inst_paths}
 
-    missing = set(frames) - set(weights)
+    missing = set(frames) - set(WEIGHTS)
     if missing:
-        raise KeyError(f"no weight in allocation file for: {sorted(missing)}")
+        raise KeyError(f"no weight in the universe for: {sorted(missing)}")
+
+    costs = {t: universe.cost_per_share(t) * COST_MULTIPLIER
+             for t in sorted(frames)}
 
     # every trading day any instrument had, so a short history truncates
     # nothing - an instrument contributes from the day its own data begins
@@ -347,24 +397,25 @@ def main():
     for df in frames.values():
         dates = df.index if dates is None else dates.union(df.index)
 
+    if WINDOW_START is not None:
+        dates = dates[dates >= pd.Timestamp(WINDOW_START)]
+    if WINDOW_END is not None:
+        dates = dates[dates < pd.Timestamp(WINDOW_END)]
+
     start = support_start()
-    if dates[0] < start:
+    if len(dates) and dates[0] < start:
         dropped = int((dates < start).sum())
         print(f"trimmed {dropped} rows before {start.date()}, where the fx "
               "and benchmark rate series begin")
         dates = dates[dates >= start]
 
-    if WINDOW_START is not None:
-        dates = dates[dates >= pd.Timestamp(WINDOW_START)]
-    if WINDOW_END is not None:
-        dates = dates[dates < pd.Timestamp(WINDOW_END)]
     if len(dates) == 0:
         raise ValueError("the configured window leaves no rows")
 
     frames = {t: on_index(df, dates) for t, df in frames.items()}
 
     income, no_file = load_income(sorted(frames), dates)
-    rates = load_financing(dates)
+    rates = load_benchmark(dates)
 
     fx = load_fx(dates)
     capital0 = account_value / fx[0]
@@ -373,24 +424,26 @@ def main():
                        for t in sorted(income))
 
     print(f"capital {account_value:,.0f} {HOME_CURRENCY} = {capital0:,.0f} USD "
-          f"at {fx[0]:.5f} (compounding)   "
-          f"read {age.total_seconds()/3600:.1f}h ago   "
-          f"vol target {VOL_TARGET:.0%}   IDM {idm:.4f}")
+          f"at {fx[0]:.5f} (fixed, compounding)   "
+          f"vol target {VOL_TARGET:.0%}   IDM {IDM:.4f}")
 
     print(f"fx {cached['pair']} history {fx[0]:.5f} -> {fx[-1]:.5f}")
 
     multiple = f" x{COST_MULTIPLIER:g}" if COST_MULTIPLIER != 1.0 else ""
-    print(f"costs: {costs_file if costs_file else 'not measured - gross only'}"
-          f"{multiple}")
-    print(f"financing: benchmark + {FINANCING_SPREAD:.2%}, "
-          f"{rates.min():.2%} to {rates.max():.2%} over the window")
+    print("costs per share: "
+          + ", ".join(f"{t} {c:.5f}" for t, c in sorted(costs.items()))
+          + multiple)
+    print(f"benchmark {rates.min():.2%} to {rates.max():.2%} over the window")
+    print(f"financing: debit benchmark + {FINANCING_SPREAD:.2%} on shorts plus "
+          f"any cash debit, credit benchmark - {CREDIT_SPREAD:.2%} above "
+          f"{CASH_THRESHOLD:,.0f} USD, borrow {BORROW_FEE:.2%} on short value")
     print(f"dividends: {counts}"
           + (f"  (never fetched: {', '.join(no_file)})" if no_file else ''))
     print(f"window: {dates[0].date()} -> {dates[-1].date()}  "
           f"({len(dates)} rows)\n")
 
     built, portfolio, ruin_at = run(
-        frames, weights, idm, fx, capital0, VOL_TARGET, MAX_LEVERAGE, costs, income, rates)
+        frames, WEIGHTS, IDM, fx, capital0, VOL_TARGET, MAX_LEVERAGE, costs, income, rates)
 
     if ruin_at is not None:
         print(f"*** account wiped out on {dates[ruin_at].date()} "
@@ -414,10 +467,24 @@ def main():
     if costs:
         print(f"costs paid   {portfolio['cost'].sum():,.0f} {HOME_CURRENCY} "
               f"({portfolio['cost'].sum()/years:,.0f}/yr)")
+
+    interest = portfolio['interest'].sum()
+    credit = portfolio['credit'].sum()
+    borrow = portfolio['borrow'].sum()
     fin = portfolio['financing'].sum()
-    if fin:
-        print(f"financing    {fin:,.0f} {HOME_CURRENCY}  "
-              f"({fin/years:,.0f}/yr)")
+    print(f"interest     {interest:,.0f} {HOME_CURRENCY}  "
+          f"({interest/years:,.0f}/yr)")
+    print(f"credit       {credit:,.0f} {HOME_CURRENCY}  "
+          f"({credit/years:,.0f}/yr, received)")
+    print(f"borrow       {borrow:,.0f} {HOME_CURRENCY}  "
+          f"({borrow/years:,.0f}/yr)")
+    print(f"financing    {fin:,.0f} {HOME_CURRENCY}  "
+          f"({fin/years:,.0f}/yr, net)")
+
+    days_short = (portfolio['short_notional'] > 0).mean()
+    days_debit = (portfolio['cash_usd'] < 0).mean()
+    print(f"             short on {days_short:.0%} of days, "
+          f"cash debit on {days_debit:.0%}")
 
     moved = portfolio['fx_pnl'].sum()
     print(f"fx           {moved:,.0f} {HOME_CURRENCY}  "

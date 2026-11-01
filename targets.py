@@ -1,10 +1,14 @@
 """
 Today's target positions.
 
-    python targets.py <allocation_csv> <features_csv> [<features_csv> ...]
+    python targets.py <features_csv> [<features_csv> ...]
 
 The shares to hold in each instrument right now, sized against the account
 value recorded by capital.py rather than any simulated equity.
+
+The weights come from universe.py and the diversification multiplier from
+config.py. Both are constants. Nothing here reads a file that the backtest
+or the correlation script writes.
 
 Only the latest row of each features file is used, each instrument on its own
 last trading date. Instruments do not share a calendar, so there is no date
@@ -21,14 +25,15 @@ import os
 import sys
 from datetime import datetime
 
-import numpy as np
 import pandas as pd
 
 import capital
 import fx_data
 import sizing
-from config import (VOL_TARGET, HOME_CURRENCY, WARMUP, PORTFOLIO_DIR, TARGET_STALE_DAYS, BENCHMARK_FILE)
-from universe import ticker_from_path
+from config import (VOL_TARGET, HOME_CURRENCY, WARMUP, PORTFOLIO_DIR,
+                    TARGET_STALE_DAYS, BENCHMARK_FILE, IDM)
+from universe import ticker_from_path, WEIGHTS
+
 
 TARGETS_FILE = 'live_targets.csv'
 COLUMNS = ['date', 'close', 'combined_forecast', 'icv']
@@ -56,15 +61,6 @@ def load_instrument(path):
     df = pd.read_csv(path, usecols=COLUMNS).iloc[WARMUP:]
     df['date'] = pd.to_datetime(df['date'])
     return df.set_index('date')
-
-
-def load_allocation(path):
-    """Instrument weights and the diversification multiplier."""
-    alloc = pd.read_csv(path).set_index('ticker')
-    idm = alloc['idm'].iloc[0]
-    if not np.allclose(alloc['idm'], idm):
-        raise ValueError("idm differs between rows of the allocation file")
-    return alloc['instrument_weight'].to_dict(), float(idm)
 
 
 def on_index(frame, index):
@@ -96,7 +92,6 @@ def support_start(path=BENCHMARK_FILE):
     rates = pd.read_csv(path, parse_dates=['observation_date'])
     return max(fx_data.load_series().index[0],
                rates['observation_date'].iloc[0])
-
 
 
 def latest_rows(frames, stale_days=TARGET_STALE_DAYS):
@@ -150,9 +145,9 @@ def live_targets(frames, weights, idm, capital_usd, vol_target):
 
 
 def main():
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 2:
         print(f"Usage: python {os.path.basename(sys.argv[0])} "
-              "<allocation_csv> <features_csv> [<features_csv> ...]")
+              "<features_csv> [<features_csv> ...]")
         sys.exit(1)
 
     spot = fx_data.load()
@@ -163,22 +158,21 @@ def main():
     account_value = stored['value']
     capital_usd = account_value / spot
 
-    weights, idm = load_allocation(sys.argv[1])
-    frames = {ticker_from_path(p): load_instrument(p) for p in sys.argv[2:]}
+    frames = {ticker_from_path(p): load_instrument(p) for p in sys.argv[1:]}
 
-    missing = set(frames) - set(weights)
+    missing = set(frames) - set(WEIGHTS)
     if missing:
-        raise KeyError(f"no weight in allocation file for: {sorted(missing)}")
+        raise KeyError(f"no weight in the universe for: {sorted(missing)}")
 
-    live = live_targets(frames, weights, idm, capital_usd, VOL_TARGET)
+    live = live_targets(frames, WEIGHTS, IDM, capital_usd, VOL_TARGET)
     dates = sorted(set(live['date']))
     asof = (f"{dates[-1]}" if len(dates) == 1
             else f"{dates[-1]}, oldest {dates[0]}")
-    
+
     print(f"capital {account_value:,.0f} {HOME_CURRENCY} = "
           f"{capital_usd:,.0f} USD at {spot:.5f}   "
           f"read {age.total_seconds() / 3600:.1f}h ago   "
-          f"vol target {VOL_TARGET:.0%}   IDM {idm:.4f}")
+          f"vol target {VOL_TARGET:.0%}   IDM {IDM:.4f}")
     print(f"targets as of {asof}\n")
     print(live[['close', 'combined_forecast', 'rounded']].round(2).to_string())
 

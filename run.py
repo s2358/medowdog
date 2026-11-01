@@ -1,15 +1,24 @@
 """
 Run the daily pipeline.
 
-    python run.py
+    python run.py               # the trading inputs
+    python run.py --research    # and the correlations, backtest and evaluation
 
-Steps in order: fx rate, download prices, volatility, ewmac, correlation,
-dividends, capital, targets, position sizing, evaluate. The cost script is deliberately
-not here - it needs US market hours and runs from its own cron entry.
+The daily run builds today's targets. Acting on them is trade.py.
 
-This builds the targets. Acting on them is trade.py.
+The research steps are separate on purpose. The correlations and the
+diversification multiplier are estimates, not observations. If they run every
+night, every position moves for reasons that have nothing to do with the
+forecast. The backtest reads nothing that the live path uses, and its starting
+capital is today's account value, so a daily run rescales nineteen years of
+history every morning.
 
-Everything each step prints goes to the terminal and to logs/run_<timestamp>.log. The run stops at the first failure, so a broken step never leaves a later one working from stale inputs.
+The cost script is not here either. It needs US market hours and runs from its
+own cron entry.
+
+Each step prints to the terminal and to logs/run_<timestamp>.log. The run stops
+at the first failure, so a broken step never leaves a later one working from
+stale inputs.
 """
 
 import subprocess
@@ -17,7 +26,7 @@ import sys
 import time
 from datetime import datetime
 
-from config import PROJECT_ROOT, DATA_DIR, CORRELATIONS_DIR, FEATURES_DIR
+from config import PROJECT_ROOT, DATA_DIR, FEATURES_DIR
 from universe import WEIGHTS
 
 TICKERS = sorted(WEIGHTS)
@@ -59,30 +68,26 @@ def features_csvs():
     return [str(p) for p in paths]
 
 
-def allocation_csv():
-    path = CORRELATIONS_DIR / f"allocation_{'_'.join(TICKERS)}.csv"
-    if not path.exists():
-        raise FileNotFoundError(f"{path} not written by the correlation step")
-    return str(path)
-
-# each entry builds its argv lazily - the downloader creates the files the 
-# later steps glob for, so the paths cannot be resolved up front
-STEPS = [
+# what today's position depends on. Each changes daily, and the target
+# cannot be computed without it.
+DAILY = [
         ('fx data',        lambda: ['fx_data.py']),
         ('download',       lambda: ['1_ibkr_downloader.py'] + TICKERS),
         ('volatility',     lambda: ['2_volatility.py'] + instrument_csvs()),
         ('ewmac',          lambda: ['3_ewmac_calculator.py'] + features_csvs()),
-        ('correlation',    lambda: ['4_correlation.py'] + features_csvs()),
         ('dividends',      lambda: ['dividends.py']),
-#        ('reconcile',      lambda: ['reconcile.py']),
         ('capital',        lambda: ['capital.py']),
         ('equity',         lambda: ['equity.py']),
-        ('targets',        lambda: ['targets.py', allocation_csv()]
-                                    + features_csvs()),
-        ('position sizing',lambda: ['6_position_sizing.py', allocation_csv()]
-                                    + features_csvs()),
-        ('evaluate',        lambda: ['7_evaluate.py']),
+        ('targets',        lambda: ['targets.py'] + features_csvs()),
         ]
+
+# research, run deliberately rather than nightly
+RESEARCH = [
+        ('correlation',    lambda: ['4_correlation.py'] + features_csvs()),
+        ('position sizing',lambda: ['6_position_sizing.py'] + features_csvs()),
+        ('evaluate',       lambda: ['7_evaluate.py']),
+        ]
+
 
 def run_step(label, argv, log):
     """Run one step, streaming its output. Returns (returncode, seconds)."""
@@ -106,6 +111,9 @@ def run_step(label, argv, log):
     return proc.returncode, time.time() - start
 
 def main():
+    research = '--research' in sys.argv[1:]
+    sequence = DAILY + RESEARCH if research else DAILY
+
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_path = LOG_DIR / f'run_{stamp}.log'
@@ -116,10 +124,11 @@ def main():
     with open(log_path, 'w') as log:
         emit(f"pipeline run {datetime.now().isoformat(timespec='seconds')}", log)
         emit(f"python    {sys.executable}", log)
+        emit(f"mode      {'DAILY + RESEARCH' if research else 'DAILY'}", log)
         emit(f"tickers   {', '.join(TICKERS)}", log)
         emit(f"log       {log_path}", log)
 
-        for label, build in STEPS:
+        for label, build in sequence:
             try:
                 argv = build()
             except Exception as exc:
@@ -130,7 +139,7 @@ def main():
                 results.append((label, 'SETUP FAIL', 0.0))
                 failed = label
                 break
-            
+
             code, seconds = run_step(label, argv, log)
             results.append((label, 'ok' if code == 0 else f'exit {code}', seconds))
 
@@ -145,7 +154,7 @@ def main():
         done = {r[0] for r in results}
         for label, status, seconds in results:
             emit(f"  {label:18s}  {status:10s}  {seconds:6.1f}s", log)
-        for label, _ in STEPS:
+        for label, _ in sequence:
             if label not in done:
                 emit(f"  {label:18s}  {'skipped':10s}", log)
 

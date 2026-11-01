@@ -8,6 +8,15 @@ Must run during US market hours - the quote stream returns IBKR's -1 sentinel wh
 Trade sizes come from the turnover file the position sizing script writes. The
 $1 commission minimum is divided by them, so they dominate the result: at 5
 shares the minimum is $0.20 a share, at 200 it is $0.005.
+
+An instrument that has never been traded has no turnover row, so its trade
+size is estimated from the sizing formula instead. The estimate is marked in
+the output and is replaced by the measurement as soon as the instrument
+carries a weight.
+
+This script measures. It sets nothing. The figure it prints is written into
+universe.py by hand, because a cost is a property of the instrument, not of
+the night it was sampled.
 """
 
 import pandas as pd
@@ -17,7 +26,10 @@ import sys
 from datetime import datetime
 from ib_async import IB
 
-from config import (IB_HOST, IB_PORT, IB_MARKET_DATA_TYPE, WARMUP, BUSINESS_DAYS, SPEED_LIMIT_SR, COSTS_DIR, PORTFOLIO_DIR)
+from config import (IB_HOST, IB_PORT, IB_MARKET_DATA_TYPE, WARMUP, BUSINESS_DAYS, SPEED_LIMIT_SR, COSTS_DIR, PORTFOLIO_DIR, VOL_TARGET)
+import capital
+import fx_data
+import sizing
 import universe
 from universe import WEIGHTS, ticker_from_path
 
@@ -29,6 +41,15 @@ ANNUALISE = np.sqrt(BUSINESS_DAYS)
 SAMPLES = 20
 SAMPLE_INTERVAL = 15        # seconds
 PROBE_TIMEOUT = 15          # seconds to wait for the first quote
+
+# a candidate has never been traded, so it has no measured turnover. Its
+# average position is the full-strength position, since the mean absolute
+# forecast is 10 by construction, and its average trade is close to the
+# inertia band times that - measured at 0.118 to 0.153 on the traded three
+# against a band of 0.10.
+CANDIDATE_WEIGHT = 0.20
+CANDIDATE_IDM = 2.0
+TRADE_FRACTION = 0.13
 
 SPINNER = '|/-\\'
 ANIMATE = sys.stdout.isatty()   # no spinner when redirected to a log
@@ -107,6 +128,20 @@ def load_typical_trade():
     series = pd.read_csv(path).set_index('ticker')['typical_trade']
     return {t: max(1, int(round(v))) for t, v in series.items()}, path.name
 
+
+def estimated_trade(icv, capital_usd, weight=CANDIDATE_WEIGHT,
+                    idm=CANDIDATE_IDM, fraction=TRADE_FRACTION):
+    """
+    Trade size for an instrument that has never been traded.
+
+    Replaced by the measured figure as soon as the instrument carries a
+    weight and the position sizing script has walked a history with it in.
+    """
+    daily_target = sizing.daily_cash_vol_target(capital_usd, VOL_TARGET)
+    full = sizing.volatility_scalar(daily_target, icv) * weight * idm
+    return max(1, int(round(fraction * full)))
+
+
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: python {os.path.basename(sys.argv[0])} " "<instrument_csv> [<instrument_csv> ...]")
@@ -116,9 +151,10 @@ def main():
     tickers = [ticker_from_path(p) for p in paths]
 
     typical_trade, trade_file = load_typical_trade()
-    missing = [t for t in tickers if t not in typical_trade]
-    if missing:
-        raise KeyError(f"no typical_trade entry for: {missing}")
+    candidates = [t for t in tickers if t not in typical_trade]
+
+    stored, _ = capital.load()
+    capital_usd = stored['value'] / fx_data.load()
 
     ib = IB()
     ib.connect(IB_HOST, IB_PORT, clientId=CLIENT_ID, readonly=True)
@@ -142,8 +178,14 @@ def main():
           f"market open, sampling {len(tickers)} instruments "
           f"({SAMPLES} X {SAMPLE_INTERVAL}s each)")
 
-    print(f"trade sizes from {trade_file}: "
-          + ", ".join(f"{t} {typical_trade[t]}" for t in tickers))
+    measured = [t for t in tickers if t in typical_trade]
+    if measured:
+        print(f"trade sizes from {trade_file}: "
+              + ", ".join(f"{t} {typical_trade[t]}" for t in measured))
+    if candidates:
+        print(f"trade sizes estimated for {', '.join(candidates)} "
+              f"at weight {CANDIDATE_WEIGHT:.0%}, IDM {CANDIDATE_IDM}, "
+              f"capital {capital_usd:,.0f} USD")
 
     rows = []
     failed = []
@@ -169,7 +211,12 @@ def main():
 
             spread = float(np.median(spreads))
             half = spread / 2 * universe.multiplier(ticker)
-            shares = typical_trade[ticker]
+
+            if ticker in typical_trade:
+                shares, estimated = typical_trade[ticker], False
+            else:
+                shares, estimated = estimated_trade(icv, capital_usd), True
+
             comm = universe.commission(ticker, shares, close) / shares
             sc, C = standardised_cost(half, comm, icv)
 
@@ -183,6 +230,7 @@ def main():
                 'spread_max': round(max(spreads), 4),
                 'half_spread': round(half, 5),
                 'typical_shares': shares,
+                'shares_estimated': estimated,
                 'commission_per_share': round(comm, 5),
                 'cost_per_share_C': round(C, 5),
                 'icv': round(icv, 4),
@@ -191,8 +239,10 @@ def main():
                 'speed_limit_turnover': round(SPEED_LIMIT_SR / sc, 1),
                 'trade_sizes_from': trade_file,
             })
+            mark = ' (estimated size)' if estimated else ''
             print(f"{ticker:6s} spread {spread:.4f} C {C:.5f} "
-                  f"std cost {sc:.5f} SR speed limit {SPEED_LIMIT_SR/sc:.0f}/yr")
+                  f"std cost {sc:.5f} SR speed limit "
+                  f"{SPEED_LIMIT_SR/sc:.0f}/yr{mark}")
     finally:
         ib.disconnect()
 
@@ -203,6 +253,11 @@ def main():
     if failed:
         print(f"\nnot measured: {', '.join(failed)}")
 
+    print("\nto adopt these, set cost_per_share in universe.py:")
+    for row in rows:
+        mark = "   (estimated trade size)" if row['shares_estimated'] else ""
+        print(f"    {row['ticker']:6s} {row['cost_per_share_C']:.5f}{mark}")
+
     out = pd.DataFrame(rows)
     COSTS_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -212,6 +267,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-

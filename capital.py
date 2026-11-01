@@ -30,7 +30,7 @@ TAG = 'NetLiquidation'
 
 def fetch():
     """Net liquidation value, its currency, and the account it belongs to."""
-    accounts, values = summary()
+    accounts, values, _ = summary()
     found = next((v for v in values if v.tag == TAG), None)
     if found is None:
         raise RuntimeError(f"the broker reported no {TAG}")
