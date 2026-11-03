@@ -79,6 +79,7 @@ DAILY = [
         ('capital',        lambda: ['capital.py']),
         ('equity',         lambda: ['equity.py']),
         ('targets',        lambda: ['targets.py'] + features_csvs()),
+        ('dashboard',      lambda: ['dashboard.py']),
         ]
 
 # research, run deliberately rather than nightly

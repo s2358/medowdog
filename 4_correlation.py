@@ -2,6 +2,8 @@
 Subsystem-return correlations and the IDM.
 
     python 4_correlation.py <csv> <csv> [<csv> ...]
+    python 4_correlation.py <csv> ... --weights SPY=20,GLDM=10,SLV=10
+    python 4_correlation.py <csv> ... --weights equal
 
 Writes three files to data/correlations/:
     subsystem_returns_<tickers>.csv     the panel
@@ -16,6 +18,13 @@ the allocation file; it is kept as the record of what was measured and when.
 Instruments are joined on every date any of them traded rather than only the dates all of them did, so one short history does not shorten the rest. Each correlation is then measured on its own pair's overlap.
 
 The matrix covers every file given. The multiplier covers only the instruments that carry a weight, so a candidate can be measured against the book before it is admitted to it.
+
+--weights answers the other half of that question. A candidate has no weight in
+universe.py until it is adopted, so the multiplier cannot show what adopting it
+would do. Given a weighting on the command line, the run uses that instead and
+writes its record under allocation_whatif_, leaving universe.py untouched.
+Numbers may be percentages or fractions and are normalised to sum to one,
+because that is the only form the multiplier is defined for.
 """
 
 import pandas as pd
@@ -25,6 +34,66 @@ import sys
 from config import (IDM_CAP, WARMUP, BUSINESS_DAYS, CORRELATIONS_DIR,
                     WINDOW_START, WINDOW_END, IDM as IDM_IN_CONFIG)
 from universe import WEIGHTS, ticker_from_path
+
+
+def parse_args(argv):
+    """Paths, and an optional weighting to test instead of the universe's."""
+    paths, spec = [], None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == '--weights':
+            i += 1
+            if i >= len(argv):
+                raise ValueError("--weights needs a value")
+            spec = argv[i]
+        elif arg.startswith('--weights='):
+            spec = arg.split('=', 1)[1]
+        else:
+            paths.append(arg)
+        i += 1
+    return paths, spec
+
+
+def parse_weights(spec, tickers):
+    """
+    TICKER=NUMBER pairs, or the word 'equal'.
+
+    Whatever is given is normalised to sum to one. Carver: the weights sum to
+    one over what you hold, and where they do not, you divide until they do.
+    So 20,10,10,20,20,20 and 0.2,0.1,0.1,0.2,0.2,0.2 mean the same thing.
+
+    A weight of zero is allowed and removes the instrument from the
+    multiplier while leaving it in the matrix, which is how a candidate is
+    looked at without being counted.
+    """
+    if spec.strip().lower() == 'equal':
+        share = 1.0 / len(tickers)
+        return {t: share for t in tickers}
+
+    given = {}
+    for part in spec.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        if '=' not in part:
+            raise ValueError(f"expected TICKER=NUMBER, got {part!r}")
+        name, number = part.split('=', 1)
+        given[name.strip().upper()] = float(number)
+
+    unknown = set(given) - set(tickers)
+    if unknown:
+        raise ValueError(f"not among the files given: {sorted(unknown)}")
+    missing = set(tickers) - set(given)
+    if missing:
+        raise ValueError(f"no weight given for: {sorted(missing)}")
+    if any(w < 0 for w in given.values()):
+        raise ValueError("a negative instrument weight has no meaning here")
+
+    total = sum(given.values())
+    if total <= 0:
+        raise ValueError("the weights sum to zero")
+    return {t: given[t] / total for t in tickers}
 
 
 def load_subsystem_returns(path):
@@ -111,11 +180,18 @@ def instrument_diversification_multiplier(H, weights, cap=IDM_CAP):
     return min(1 / np.sqrt(v), cap), v
 
 def main():
-    if len(sys.argv) < 3:
-        print(f"Usage: python {os.path.basename(sys.argv[0])} <csv1> <csv2> [<csv3> ...]")
+    try:
+        paths, spec = parse_args(sys.argv[1:])
+    except ValueError as exc:
+        print(exc)
         sys.exit(1)
 
-    paths = sys.argv[1:]
+    if len(paths) < 2:
+        print(f"Usage: python {os.path.basename(sys.argv[0])} "
+              "<csv1> <csv2> [<csv3> ...] "
+              "[--weights TICKER=N,TICKER=N,... | --weights equal]")
+        sys.exit(1)
+
     panel = build_panel(paths)
     n = len(panel)
 
@@ -124,15 +200,32 @@ def main():
 
     # the matrix covers every file given, so a candidate can be measured
     # against the book before it is given a weight. The multiplier is only
-    # defined over what is actually traded.
-    traded = [c for c in H.columns if c in WEIGHTS]
-    extra = [c for c in H.columns if c not in WEIGHTS]
+    # defined over what is actually traded - or, with --weights, over what a
+    # proposed book would hold.
+    what_if = spec is not None
+    if what_if:
+        try:
+            weights = parse_weights(spec, list(H.columns))
+        except ValueError as exc:
+            print(f"--weights: {exc}")
+            sys.exit(1)
+        traded = [c for c in H.columns if weights[c] > 0]
+        extra = [c for c in H.columns if weights[c] == 0]
+    else:
+        weights = WEIGHTS
+        traded = [c for c in H.columns if c in WEIGHTS]
+        extra = [c for c in H.columns if c not in WEIGHTS]
+
+    if not traded:
+        print("no instrument carries a weight - nothing to measure")
+        sys.exit(1)
+
     idm, v = instrument_diversification_multiplier(
-            H.loc[traded, traded], WEIGHTS)
+            H.loc[traded, traded], weights)
 
     allocation = pd.DataFrame({
         'ticker': traded,
-        'instrument_weight': [WEIGHTS[c] for c in traded],
+        'instrument_weight': [weights[c] for c in traded],
         'idm': idm,
         })
 
@@ -165,11 +258,13 @@ def main():
                   f"95% ci [{r - 1.96 * se:+.3f}, {r + 1.96 * se:+.3f}]  "
                   f"on {shared} shared rows")
 
-    print("\ninstrument weights:")
+    source = "proposed on the command line" if what_if else "from universe.py"
+    print(f"\ninstrument weights ({source}):")
     for c in traded:
-        print(f" {c:6s} {WEIGHTS[c]:.0%}")
+        print(f" {c:6s} {weights[c]:.1%}")
     if extra:
-        print(f" not weighted: {', '.join(extra)}")
+        label = "at zero weight" if what_if else "not weighted"
+        print(f" {label}: {', '.join(extra)}")
 
     print(f"W x H x W' = {v:.5f}")
     print(f"IDM        = {idm:.4f}" + ("  (capped)" if idm == IDM_CAP else ""))
@@ -177,7 +272,14 @@ def main():
     change = idm - IDM_IN_CONFIG
     print(f"config.py holds IDM = {IDM_IN_CONFIG:.4f}, "
           f"a difference of {change:+.4f}")
-    if abs(change) > 1e-4:
+
+    if what_if:
+        print("this is a what-if. universe.py and config.py are untouched, "
+              "and nothing has been adopted.")
+        if abs(change) > 1e-4:
+            print(f"adopting this book would scale every position by "
+                  f"{idm / IDM_IN_CONFIG:.2f}x.")
+    elif abs(change) > 1e-4:
         print("nothing uses the measured value. To adopt it, edit config.py.")
 
     CORRELATIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -192,7 +294,8 @@ def main():
     H.to_csv(corr_out)
     print(f"correlation matrix written to {corr_out}")
 
-    alloc_out = CORRELATIONS_DIR / f'allocation_{traded_stem}.csv'
+    prefix = 'allocation_whatif' if what_if else 'allocation'
+    alloc_out = CORRELATIONS_DIR / f'{prefix}_{traded_stem}.csv'
     allocation.to_csv(alloc_out, index=False)
     print(f"allocation written to {alloc_out}")
 

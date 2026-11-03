@@ -56,10 +56,20 @@ INSTRUMENTS = {
         'cost_per_share': 0.01,      # measured 2026-10-29
     },
 
-    # candidates, described but not traded. Each covers a sector the book has
-    # no exposure to: rates, currency, energy. TLT was the obvious rates
-    # choice and is not here - IBKR serves it only from 2016-02-03, when its
-    # listing moved to NASDAQ, where EDV goes back to 2007.
+    # candidates, described and costed but not traded. Each covers a sector
+    # the book has no exposure to: rates, currency, energy. All three came
+    # in under the speed limit on 2026-11-02 and were admitted at 20% each,
+    # then withdrawn the same night: the six-instrument backtest returned
+    # 6.6% against 12.4%, and the reason was cost. EDV pays out 982 USD a
+    # year of dividends while short it, five times its trading cost, and EDV
+    # plus FXY carry 52% of the book's gross notional for 21% of its gross
+    # profit, which pushes financing up and makes the leverage cap bind.
+    # Readmitting any of them needs a holding-cost test that includes the
+    # dividend yield, which the speed limit does not.
+    #
+    # TLT was the obvious rates choice and is not here - IBKR serves it only
+    # from 2016-02-03, when its listing moved to NASDAQ, where EDV goes back
+    # to 2007.
     'EDV': {
         'weight': 0.0,
         'type': 'STK',
@@ -68,6 +78,7 @@ INSTRUMENTS = {
         'multiplier': 1,
         'tick': 0.01,
         'commission': STOCK_COMMISSION,
+        'cost_per_share': 0.01649,   # measured 2026-11-02, estimated trade size
     },
     'FXY': {
         'weight': 0.0,
@@ -77,6 +88,7 @@ INSTRUMENTS = {
         'multiplier': 1,
         'tick': 0.01,
         'commission': STOCK_COMMISSION,
+        'cost_per_share': 0.01000,   # measured 2026-11-02, estimated trade size
     },
     'USO': {
         'weight': 0.0,
@@ -86,6 +98,7 @@ INSTRUMENTS = {
         'multiplier': 1,
         'tick': 0.01,
         'commission': STOCK_COMMISSION,
+        'cost_per_share': 0.05704,   # measured 2026-11-02, estimated trade size
     },
 }
 
@@ -165,6 +178,11 @@ def cost_per_share(ticker):
 
     The commission part carries the per-order minimum divided by the trade
     size, so a large change in account size needs a new measurement.
+
+    This is the cost of trading, not the cost of holding. An instrument the
+    system will short also pays the borrow fee and, where it distributes, the
+    dividend - in full, where a long receives it net of withholding. On EDV
+    that holding cost measured five times this figure.
     """
     value = instrument(ticker).get('cost_per_share')
     if value is None:

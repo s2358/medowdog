@@ -84,7 +84,14 @@ FORECAST_CAP = 20
 FORECAST_SCALARS = {'16_64': 3.75, '32_128': 2.65, '64_256': 1.87}
 FORECAST_WEIGHTS = {'16_64': 0.42, '32_128': 0.16, '64_256': 0.42}
 FDM = 1.099              # forecast diversification multiplier
-IDM = 1.4239             # instrument diversification multiplier, measured by 4_correlation.py
+
+# instrument diversification multiplier, measured by 4_correlation.py.
+# 1.4239 is the three-instrument book. The six-instrument book measures
+# 2.0284, which was tried on 2026-11-02 and withdrawn: it raised mean gross
+# leverage from 1.64x to 2.34x, made the 4x cap bind on 7.2% of days against
+# 2.1%, and took the net Sharpe from 0.63 to 0.40. Reproduce it with
+# 4_correlation.py --weights SPY=20,GLDM=10,SLV=10,EDV=20,FXY=20,USO=20
+IDM = 1.4239
 
 IDM_CAP = 2.5           # instrument diversification multiplier ceiling
 FDM_CAP = 2.5           # forecast diversification multiplier ceiling

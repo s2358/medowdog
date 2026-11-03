@@ -353,15 +353,32 @@ def run(frames, weights, idm, fx, capital0, vol_target, max_leverage, costs=None
 
 
 def turnover_stats(df, years):
-    """Carver: turnover = avg blocks traded per year / (2 x avg abs held)."""
+    """
+    Per-instrument turnover and what holding it actually cost.
+
+    Carver: turnover = avg blocks traded per year / (2 x avg abs held).
+
+    The cost and dividend columns are in USD, as the loop runs. Dividend is
+    signed by the position: a short pays the distribution out, and pays it in
+    full, where a long receives it net of 30% withholding. That asymmetry is
+    invisible in the speed-limit test, which looks only at the spread and the
+    commission, so an instrument with a yield can be cheap to trade and
+    expensive to hold.
+    """
     blocks_traded = df['trade'].abs().sum()
     avg_held = df['held'].abs().mean()
     traded_per_year = blocks_traded / years
     turnover = traded_per_year / (2 * avg_held) if avg_held else np.nan
 
     trades = df.loc[df['trade'] != 0, 'trade'].abs()
+    notional = df['notional'].abs()
+    avg_notional = notional[notional > 0].mean()
+    dividend = df['dividend'].sum()
+
     return {
         'avg_abs_position': avg_held,
+        'avg_notional_usd': avg_notional,
+        'pct_days_short': float((df['held'] < 0).mean()),
         'blocks_traded_per_year': traded_per_year,
         'turnover': turnover,
         'n_trades': len(trades),
@@ -369,6 +386,11 @@ def turnover_stats(df, years):
         'typical_trade': trades.mean() if len(trades) else np.nan,
         'median_trade': trades.median() if len(trades) else np.nan,
         'pct_days_zero_position': (df['held'] == 0).mean(),
+        'gross_pnl_per_year': df['pnl'].sum() / years,
+        'cost_per_year': df['cost'].sum() / years,
+        'dividend_per_year': dividend / years,
+        'dividend_pct_notional': (dividend / years / avg_notional
+                                  if avg_notional else np.nan),
     }
 
 
